@@ -1,6 +1,5 @@
 flask
 gunicorn
-face_recognition
 opencv-python
 pillow
 numpy
