@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 app = Flask(__name__)
 app.secret_key = "facenova_secret"
 
-# Face detection
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
@@ -19,12 +18,15 @@ face_cascade = cv2.CascadeClassifier(
 def home():
     return """
     <body style="background:#0f172a;color:white;text-align:center;">
-    <h1>🚀 FaceNova Pro</h1>
+    <h1>🚀 FaceNova Ultra</h1>
+
+    <input id="name" placeholder="Enter Your Name"><br><br>
 
     <video id="video" width="300" autoplay></video><br><br>
     <button onclick="capture()">Login</button><br><br>
 
     <a href="/admin"><button>Admin Panel</button></a>
+    <a href="/gallery"><button>Gallery</button></a>
     <a href="/download"><button>Download CSV</button></a>
 
     <canvas id="canvas" style="display:none;"></canvas>
@@ -35,6 +37,12 @@ def home():
     .then(stream => video.srcObject = stream);
 
     function capture(){
+        let name = document.getElementById("name").value;
+        if(!name){
+            alert("Enter name first!");
+            return;
+        }
+
         const canvas = document.getElementById('canvas');
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -42,7 +50,13 @@ def home():
 
         fetch('/login',{
             method:'POST',
-            body:canvas.toDataURL('image/jpeg')
+            body: JSON.stringify({
+                image: canvas.toDataURL('image/jpeg'),
+                name: name
+            }),
+            headers: {
+                "Content-Type": "application/json"
+            }
         })
         .then(res=>res.text())
         .then(data=>document.body.innerHTML=data);
@@ -55,9 +69,11 @@ def home():
 @app.route("/login", methods=["POST"])
 def login():
     try:
-        data = request.data.decode("utf-8").split(",")[1]
-        img = base64.b64decode(data)
+        data = request.get_json()
+        img_data = data["image"].split(",")[1]
+        name = data["name"]
 
+        img = base64.b64decode(img_data)
         image = Image.open(io.BytesIO(img)).convert("RGB")
         np_img = np.array(image)
 
@@ -67,14 +83,12 @@ def login():
         if len(faces)==0:
             return "<h2>No face detected ❌</h2>"
 
-        # 📸 SAVE PHOTO
+        # 📸 Save Photo
         if not os.path.exists("photos"):
             os.mkdir("photos")
 
         filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
         cv2.imwrite(f"photos/{filename}", cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR))
-
-        name = "User"
 
         now = datetime.now()
         date = now.strftime("%Y-%m-%d")
@@ -82,17 +96,10 @@ def login():
 
         if not os.path.exists("attendance.csv"):
             with open("attendance.csv","w",newline="") as f:
-                csv.writer(f).writerow(["Name","Date","Time"])
+                csv.writer(f).writerow(["Name","Date","Time","Photo"])
 
-        already=False
-        with open("attendance.csv") as f:
-            for line in f:
-                if name in line and date in line:
-                    already=True
-
-        if not already:
-            with open("attendance.csv","a",newline="") as f:
-                csv.writer(f).writerow([name,date,time])
+        with open("attendance.csv","a",newline="") as f:
+            csv.writer(f).writerow([name,date,time,filename])
 
         return f"<h2>Welcome {name} 🚀<br>{date} {time}</h2>"
 
@@ -143,10 +150,33 @@ def admin():
     </table><br>
 
     <a href="/graph"><button>Show Graph</button></a>
+    <a href="/gallery"><button>Gallery</button></a>
     <a href="/delete"><button>Delete All</button></a>
     <a href="/logout"><button>Logout</button></a>
     </body>
     """
+
+# ================= GALLERY =================
+@app.route("/gallery")
+def gallery():
+    if not os.path.exists("photos"):
+        return "No photos"
+
+    images=""
+    for img in os.listdir("photos"):
+        images+=f'<img src="/photo/{img}" width="120" style="margin:10px;">'
+
+    return f"""
+    <body style="background:black;color:white;text-align:center;">
+    <h1>Gallery 📸</h1>
+    {images}
+    <br><a href="/">Back</a>
+    </body>
+    """
+
+@app.route("/photo/<filename>")
+def photo(filename):
+    return send_file(f"photos/{filename}")
 
 # ================= GRAPH =================
 @app.route("/graph")
