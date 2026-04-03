@@ -67,6 +67,13 @@ def login():
         if len(faces)==0:
             return "<h2>No face detected ❌</h2>"
 
+        # 📸 SAVE PHOTO
+        if not os.path.exists("photos"):
+            os.mkdir("photos")
+
+        filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
+        cv2.imwrite(f"photos/{filename}", cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR))
+
         name = "User"
 
         now = datetime.now()
