@@ -7,7 +7,7 @@ import cv2
 import matplotlib.pyplot as plt
 
 app = Flask(__name__)
-app.secret_key = "facenova_secret"
+app.secret_key = "facenova_pro"
 
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
@@ -17,19 +17,60 @@ face_cascade = cv2.CascadeClassifier(
 @app.route("/")
 def home():
     return """
-    <body style="background:#0f172a;color:white;text-align:center;">
-    <h1>🚀 FaceNova Ultra</h1>
+    <style>
+    body {
+        margin:0;
+        font-family:sans-serif;
+        background: linear-gradient(135deg,#0f172a,#1e293b);
+        color:white;
+        text-align:center;
+    }
+    .card {
+        margin-top:30px;
+        background:rgba(255,255,255,0.05);
+        padding:20px;
+        border-radius:15px;
+        backdrop-filter: blur(10px);
+        box-shadow:0 0 20px rgba(0,0,0,0.5);
+    }
+    input {
+        padding:10px;
+        border:none;
+        border-radius:10px;
+        margin-bottom:10px;
+    }
+    button {
+        padding:10px 20px;
+        margin:5px;
+        border:none;
+        border-radius:10px;
+        background:#22c55e;
+        color:white;
+        cursor:pointer;
+    }
+    button:hover {
+        background:#16a34a;
+    }
+    video {
+        border-radius:15px;
+    }
+    </style>
 
-    <input id="name" placeholder="Enter Your Name"><br><br>
+    <h1>🚀 FaceNova Ultra PRO</h1>
+
+    <div class="card">
+    <input id="name" placeholder="Enter your name"><br>
 
     <video id="video" width="300" autoplay></video><br><br>
-    <button onclick="capture()">Login</button><br><br>
 
-    <a href="/admin"><button>Admin Panel</button></a>
+    <button onclick="capture()">Scan Face</button><br><br>
+
+    <a href="/admin"><button>Admin</button></a>
     <a href="/gallery"><button>Gallery</button></a>
-    <a href="/download"><button>Download CSV</button></a>
+    <a href="/download"><button>CSV</button></a>
 
     <canvas id="canvas" style="display:none;"></canvas>
+    </div>
 
     <script>
     const video = document.getElementById('video');
@@ -38,15 +79,14 @@ def home():
 
     function capture(){
         let name = document.getElementById("name").value;
-        if(!name){
-            alert("Enter name first!");
-            return;
-        }
+        if(!name){ alert("Enter name"); return; }
 
         const canvas = document.getElementById('canvas');
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         canvas.getContext('2d').drawImage(video,0,0);
+
+        document.body.innerHTML="<h2>🔍 Scanning...</h2>";
 
         fetch('/login',{
             method:'POST',
@@ -54,84 +94,53 @@ def home():
                 image: canvas.toDataURL('image/jpeg'),
                 name: name
             }),
-            headers: {
-                "Content-Type": "application/json"
-            }
+            headers: {"Content-Type":"application/json"}
         })
         .then(res=>res.text())
         .then(data=>document.body.innerHTML=data);
     }
     </script>
-    </body>
     """
 
 # ================= LOGIN =================
 @app.route("/login", methods=["POST"])
 def login():
-    try:
-        data = request.get_json()
-        img_data = data["image"].split(",")[1]
-        name = data["name"]
+    data = request.get_json()
+    img_data = data["image"].split(",")[1]
+    name = data["name"]
 
-        img = base64.b64decode(img_data)
-        image = Image.open(io.BytesIO(img)).convert("RGB")
-        np_img = np.array(image)
+    img = base64.b64decode(img_data)
+    image = Image.open(io.BytesIO(img)).convert("RGB")
+    np_img = np.array(image)
 
-        gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
-        faces = face_cascade.detectMultiScale(gray,1.3,5)
+    gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(gray,1.3,5)
 
-        if len(faces)==0:
-            return "<h2>No face detected ❌</h2>"
+    if len(faces)==0:
+        return "<h2>No face detected ❌</h2>"
 
-        # 📸 Save Photo
-        if not os.path.exists("photos"):
-            os.mkdir("photos")
+    if not os.path.exists("photos"):
+        os.mkdir("photos")
 
-        filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
-        cv2.imwrite(f"photos/{filename}", cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR))
+    filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
+    cv2.imwrite(f"photos/{filename}", cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR))
 
-        now = datetime.now()
-        date = now.strftime("%Y-%m-%d")
-        time = now.strftime("%H:%M:%S")
+    now = datetime.now()
+    date = now.strftime("%Y-%m-%d")
+    time = now.strftime("%H:%M:%S")
 
-        if not os.path.exists("attendance.csv"):
-            with open("attendance.csv","w",newline="") as f:
-                csv.writer(f).writerow(["Name","Date","Time","Photo"])
+    if not os.path.exists("attendance.csv"):
+        with open("attendance.csv","w",newline="") as f:
+            csv.writer(f).writerow(["Name","Date","Time","Photo"])
 
-        with open("attendance.csv","a",newline="") as f:
-            csv.writer(f).writerow([name,date,time,filename])
+    with open("attendance.csv","a",newline="") as f:
+        csv.writer(f).writerow([name,date,time,filename])
 
-        return f"<h2>Welcome {name} 🚀<br>{date} {time}</h2>"
+    return f"<h2>✅ Welcome {name}<br>{date} {time}</h2><a href='/'>Back</a>"
 
-    except Exception as e:
-        return f"<h2>Error: {str(e)}</h2>"
-
-# ================= ADMIN LOGIN =================
-@app.route("/admin-login", methods=["GET","POST"])
-def admin_login():
-    if request.method=="POST":
-        if request.form.get("user")=="admin" and request.form.get("pass")=="1234":
-            session["admin"]=True
-            return redirect("/admin")
-        return "<h3>Wrong ❌</h3>"
-
-    return """
-    <body style="background:black;color:white;text-align:center;">
-    <h2>Admin Login</h2>
-    <form method="post">
-    <input name="user" placeholder="Username"><br><br>
-    <input name="pass" type="password" placeholder="Password"><br><br>
-    <button>Login</button>
-    </form>
-    </body>
-    """
-
-# ================= ADMIN PANEL =================
+# ================= ADMIN =================
 @app.route("/admin")
 def admin():
-    if not session.get("admin"):
-        return redirect("/admin-login")
-
     rows=""
     if os.path.exists("attendance.csv"):
         with open("attendance.csv") as f:
@@ -141,18 +150,16 @@ def admin():
                 rows+=f"<tr><td>{d[0]}</td><td>{d[1]}</td><td>{d[2]}</td></tr>"
 
     return f"""
-    <body style="background:#0f172a;color:white;text-align:center;">
+    <body style="background:black;color:white;text-align:center;">
     <h1>Admin Panel</h1>
-
     <table border="1" style="margin:auto;">
     <tr><th>Name</th><th>Date</th><th>Time</th></tr>
     {rows}
     </table><br>
-
-    <a href="/graph"><button>Show Graph</button></a>
+    <a href="/graph"><button>Graph</button></a>
     <a href="/gallery"><button>Gallery</button></a>
-    <a href="/delete"><button>Delete All</button></a>
-    <a href="/logout"><button>Logout</button></a>
+    <a href="/delete"><button>Delete</button></a>
+    <a href="/">Home</a>
     </body>
     """
 
@@ -162,16 +169,19 @@ def gallery():
     if not os.path.exists("photos"):
         return "No photos"
 
-    images=""
+    imgs=""
     for img in os.listdir("photos"):
-        images+=f'<img src="/photo/{img}" width="120" style="margin:10px;">'
+        imgs+=f'<img src="/photo/{img}" class="img">'
 
     return f"""
-    <body style="background:black;color:white;text-align:center;">
+    <style>
+    body{{background:#0f172a;color:white;text-align:center;}}
+    .img{{width:120px;margin:10px;border-radius:10px;transition:0.3s;}}
+    .img:hover{{transform:scale(1.2);}}
+    </style>
     <h1>Gallery 📸</h1>
-    {images}
+    {imgs}
     <br><a href="/">Back</a>
-    </body>
     """
 
 @app.route("/photo/<filename>")
@@ -199,27 +209,19 @@ def graph():
 
 @app.route("/graph-img")
 def graph_img():
-    return send_file("graph.png", mimetype='image/png')
+    return send_file("graph.png")
 
 # ================= DELETE =================
 @app.route("/delete")
 def delete():
     if os.path.exists("attendance.csv"):
         os.remove("attendance.csv")
-    return "<h2>Deleted ✅</h2><a href='/admin'>Back</a>"
+    return "<h2>Deleted</h2><a href='/admin'>Back</a>"
 
 # ================= DOWNLOAD =================
 @app.route("/download")
 def download():
-    if os.path.exists("attendance.csv"):
-        return send_file("attendance.csv", as_attachment=True)
-    return "No file"
-
-# ================= LOGOUT =================
-@app.route("/logout")
-def logout():
-    session.pop("admin",None)
-    return redirect("/")
+    return send_file("attendance.csv", as_attachment=True)
 
 # ================= RUN =================
 if __name__=="__main__":
