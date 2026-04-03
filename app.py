@@ -71,20 +71,27 @@ def home():
     </div>
 
 <script>
-navigator.mediaDevices.getUserMedia({{video:true}})
-.then(stream=>{{document.getElementById('cam').srcObject=stream}})
+navigator.mediaDevices.getUserMedia({video:true})
+.then(stream=>{document.getElementById('cam').srcObject=stream})
 
-function snap(){{
+function snap(){
 let canvas=document.getElementById("canvas");
 let video=document.getElementById("cam");
+
 canvas.width=video.videoWidth;
 canvas.height=video.videoHeight;
 canvas.getContext("2d").drawImage(video,0,0);
 
-let data=canvas.toDataURL("image/jpeg");
+// compress image (IMPORTANT FIX)
+let data=canvas.toDataURL("image/jpeg",0.7);
+
 document.getElementById("imgdata").value=data;
+
+// small delay to avoid crash
+setTimeout(()=>{
 document.getElementById("camForm").submit();
-}}
+},300);
+}
 </script>
 """
 
@@ -106,26 +113,52 @@ def upload():
 
     return f"{STYLE}<h2>Saved!</h2>{preview}<br><a href='/'>Back</a>"
 
-# ---------- SIMPLE MATCH ----------
+# ---------- MATCH (SAFE DEMO) ----------
 def match_face():
     users = [u for u in os.listdir(DATA_DIR) if os.path.isdir(f"{DATA_DIR}/{u}")]
     return users[0] if users else "Unknown"
 
-# ---------- CAMERA ----------
+# ---------- CAMERA FIXED ----------
 @app.route("/camera", methods=["POST"])
 def camera():
-    name = match_face()
+    try:
+        data = request.form.get("img")
 
-    with open(CSV_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([name, datetime.now().strftime("%d-%m-%Y %H:%M:%S")])
+        if not data:
+            return f"{STYLE}<h3>No image ❌</h3><a href='/'>Back</a>"
 
-    return f"{STYLE}<h2>Detected: {name}</h2><a href='/'>Back</a>"
+        header, encoded = data.split(",", 1)
+        img_bytes = base64.b64decode(encoded)
+
+        filename = f"{DATA_DIR}/cam_{datetime.now().timestamp()}.jpg"
+        with open(filename, "wb") as f:
+            f.write(img_bytes)
+
+        name = match_face()
+
+        with open(CSV_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([name, datetime.now().strftime("%d-%m-%Y %H:%M:%S")])
+
+        return f"""
+        {STYLE}
+        <h2>✅ Face Scanned</h2>
+        <p>Detected: {name}</p>
+        <img src="/img_file/{os.path.basename(filename)}" width="200">
+        <br><br>
+        <a href="/">Back</a>
+        """
+
+    except Exception as e:
+        return f"{STYLE}<h3>Error: {str(e)}</h3><a href='/'>Back</a>"
+
+@app.route("/img_file/<filename>")
+def img_file(filename):
+    return send_file(f"{DATA_DIR}/{filename}")
 
 # ---------- GALLERY ----------
 @app.route("/gallery")
 def gallery():
     imgs = ""
-
     for user in os.listdir(DATA_DIR):
         path = f"{DATA_DIR}/{user}"
         if os.path.isdir(path):
@@ -172,7 +205,6 @@ def graph_img(file):
 @app.route("/admin")
 def admin():
     rows = ""
-
     if os.path.exists(CSV_FILE):
         with open(CSV_FILE) as f:
             for r in csv.reader(f):
