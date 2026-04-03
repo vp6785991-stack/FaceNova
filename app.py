@@ -1,228 +1,205 @@
-from flask import Flask, request, send_file, session, redirect
-import base64, io, os, csv
-from PIL import Image
-import numpy as np
+from flask import Flask, request, redirect, send_file
+import os, csv
 from datetime import datetime
-import cv2
+from PIL import Image
 import matplotlib.pyplot as plt
 
 app = Flask(__name__)
-app.secret_key = "facenova_pro"
 
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-)
+if not os.path.exists("data"):
+    os.makedirs("data")
 
-# ================= HOME =================
+CSV_FILE = "data/data.csv"
+
+# ----------- GLOBAL STYLE -----------
+STYLE = """
+<style>
+body {
+    margin:0;
+    font-family:sans-serif;
+    background: linear-gradient(135deg,#0f172a,#1e293b);
+    color:white;
+    text-align:center;
+}
+.container {
+    margin:20px;
+    padding:20px;
+    background:rgba(255,255,255,0.05);
+    border-radius:15px;
+    backdrop-filter: blur(10px);
+}
+button {
+    padding:10px 20px;
+    margin:5px;
+    border:none;
+    border-radius:10px;
+    background:#22c55e;
+    color:white;
+    cursor:pointer;
+}
+button:hover {
+    background:#16a34a;
+    transform:scale(1.05);
+}
+a {text-decoration:none;}
+img {border-radius:10px;}
+</style>
+"""
+
+# ----------- HOME -----------
 @app.route("/")
 def home():
-    return """
-    <style>
-    body {
-        margin:0;
-        font-family:sans-serif;
-        background: linear-gradient(135deg,#0f172a,#1e293b);
-        color:white;
-        text-align:center;
-    }
-    .card {
-        margin-top:30px;
-        background:rgba(255,255,255,0.05);
-        padding:20px;
-        border-radius:15px;
-        backdrop-filter: blur(10px);
-        box-shadow:0 0 20px rgba(0,0,0,0.5);
-    }
-    input {
-        padding:10px;
-        border:none;
-        border-radius:10px;
-        margin-bottom:10px;
-    }
-    button {
-        padding:10px 20px;
-        margin:5px;
-        border:none;
-        border-radius:10px;
-        background:#22c55e;
-        color:white;
-        cursor:pointer;
-    }
-    button:hover {
-        background:#16a34a;
-    }
-    video {
-        border-radius:15px;
-    }
-    </style>
-
+    return f"""
+    {STYLE}
     <h1>🚀 FaceNova Ultra PRO</h1>
+    <div class="container">
+    <form action="/capture" method="post" enctype="multipart/form-data">
+        <input type="text" name="name" placeholder="Enter Name" required><br><br>
+        <input type="file" name="photo" required><br><br>
+        <button type="submit">📸 Scan Face</button>
+    </form>
 
-    <div class="card">
-    <input id="name" placeholder="Enter your name"><br>
-
-    <video id="video" width="300" autoplay></video><br><br>
-
-    <button onclick="capture()">Scan Face</button><br><br>
-
-    <a href="/admin"><button>Admin</button></a>
-    <a href="/gallery"><button>Gallery</button></a>
-    <a href="/download"><button>CSV</button></a>
-
-    <canvas id="canvas" style="display:none;"></canvas>
+    <br>
+    <a href="/admin"><button>⚙️ Admin Panel</button></a>
+    <a href="/guide"><button>📖 Guide</button></a>
     </div>
-
-    <script>
-    const video = document.getElementById('video');
-    navigator.mediaDevices.getUserMedia({ video: true })
-    .then(stream => video.srcObject = stream);
-
-    function capture(){
-        let name = document.getElementById("name").value;
-        if(!name){ alert("Enter name"); return; }
-
-        const canvas = document.getElementById('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext('2d').drawImage(video,0,0);
-
-        document.body.innerHTML="<h2>🔍 Scanning...</h2>";
-
-        fetch('/login',{
-            method:'POST',
-            body: JSON.stringify({
-                image: canvas.toDataURL('image/jpeg'),
-                name: name
-            }),
-            headers: {"Content-Type":"application/json"}
-        })
-        .then(res=>res.text())
-        .then(data=>document.body.innerHTML=data);
-    }
-    </script>
     """
 
-# ================= LOGIN =================
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    img_data = data["image"].split(",")[1]
-    name = data["name"]
+# ----------- CAPTURE -----------
+@app.route("/capture", methods=["POST"])
+def capture():
+    name = request.form["name"]
+    photo = request.files["photo"]
 
-    img = base64.b64decode(img_data)
-    image = Image.open(io.BytesIO(img)).convert("RGB")
-    np_img = np.array(image)
+    filename = f"data/{name}_{datetime.now().strftime('%H%M%S')}.jpg"
+    photo.save(filename)
 
-    gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
-    faces = face_cascade.detectMultiScale(gray,1.3,5)
+    date = datetime.now().strftime("%d-%m-%Y")
+    time = datetime.now().strftime("%H:%M:%S")
 
-    if len(faces)==0:
-        return "<h2>No face detected ❌</h2>"
+    with open(CSV_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([name, date, time])
 
-    if not os.path.exists("photos"):
-        os.mkdir("photos")
+    return redirect("/")
 
-    filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
-    cv2.imwrite(f"photos/{filename}", cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR))
-
-    now = datetime.now()
-    date = now.strftime("%Y-%m-%d")
-    time = now.strftime("%H:%M:%S")
-
-    if not os.path.exists("attendance.csv"):
-        with open("attendance.csv","w",newline="") as f:
-            csv.writer(f).writerow(["Name","Date","Time","Photo"])
-
-    with open("attendance.csv","a",newline="") as f:
-        csv.writer(f).writerow([name,date,time,filename])
-
-    return f"<h2>✅ Welcome {name}<br>{date} {time}</h2><a href='/'>Back</a>"
-
-# ================= ADMIN =================
+# ----------- ADMIN -----------
 @app.route("/admin")
 def admin():
-    rows=""
-    if os.path.exists("attendance.csv"):
-        with open("attendance.csv") as f:
-            next(f)
-            for line in f:
-                d=line.strip().split(",")
-                rows+=f"<tr><td>{d[0]}</td><td>{d[1]}</td><td>{d[2]}</td></tr>"
+    rows = ""
+    if os.path.exists(CSV_FILE):
+        with open(CSV_FILE) as f:
+            reader = csv.reader(f)
+            for r in reader:
+                rows += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td></tr>"
 
     return f"""
-    <body style="background:black;color:white;text-align:center;">
-    <h1>Admin Panel</h1>
+    {STYLE}
+    <h1>⚙️ Admin Dashboard</h1>
+    <div class="container">
     <table border="1" style="margin:auto;">
     <tr><th>Name</th><th>Date</th><th>Time</th></tr>
     {rows}
-    </table><br>
-    <a href="/graph"><button>Graph</button></a>
-    <a href="/gallery"><button>Gallery</button></a>
-    <a href="/delete"><button>Delete</button></a>
-    <a href="/">Home</a>
-    </body>
+    </table>
+
+    <br>
+    <a href="/graph"><button>📊 Analytics</button></a>
+    <a href="/gallery"><button>🖼️ Gallery</button></a>
+    <a href="/download"><button>⬇️ CSV</button></a>
+    <a href="/delete"><button>🗑️ Reset</button></a>
+    <a href="/guide"><button>📖 Guide</button></a>
+    <a href="/"><button>🏠 Home</button></a>
+    </div>
     """
 
-# ================= GALLERY =================
+# ----------- GALLERY -----------
 @app.route("/gallery")
 def gallery():
-    if not os.path.exists("photos"):
-        return "No photos"
-
-    imgs=""
-    for img in os.listdir("photos"):
-        imgs+=f'<img src="/photo/{img}" class="img">'
+    imgs = ""
+    for file in os.listdir("data"):
+        if file.endswith(".jpg"):
+            imgs += f'<img src="/img/{file}" width="120" style="margin:10px;">'
 
     return f"""
-    <style>
-    body{{background:#0f172a;color:white;text-align:center;}}
-    .img{{width:120px;margin:10px;border-radius:10px;transition:0.3s;}}
-    .img:hover{{transform:scale(1.2);}}
-    </style>
-    <h1>Gallery 📸</h1>
+    {STYLE}
+    <h1>📸 Smart Gallery</h1>
+    <div class="container">
     {imgs}
-    <br><a href="/">Back</a>
+    <br>
+    <a href="/admin"><button>Back</button></a>
+    </div>
     """
 
-@app.route("/photo/<filename>")
-def photo(filename):
-    return send_file(f"photos/{filename}")
+@app.route("/img/<path:filename>")
+def img(filename):
+    return send_file(f"data/{filename}")
 
-# ================= GRAPH =================
+# ----------- GRAPH -----------
 @app.route("/graph")
 def graph():
-    if not os.path.exists("attendance.csv"):
-        return "No data"
+    names = {}
 
-    data={}
-    with open("attendance.csv") as f:
-        next(f)
-        for line in f:
-            name=line.split(",")[0]
-            data[name]=data.get(name,0)+1
+    if os.path.exists(CSV_FILE):
+        with open(CSV_FILE) as f:
+            reader = csv.reader(f)
+            for r in reader:
+                names[r[0]] = names.get(r[0], 0) + 1
 
     plt.figure()
-    plt.bar(list(data.keys()), list(data.values()))
-    plt.savefig("graph.png")
+    plt.bar(names.keys(), names.values())
+    plt.savefig("data/graph.png")
 
-    return '<img src="/graph-img">'
+    return f"""
+    {STYLE}
+    <h1>📊 Analytics Dashboard</h1>
+    <div class="container">
+    <img src="/graph-img" width="300">
+    <br><br>
+    <a href="/admin"><button>Back</button></a>
+    </div>
+    """
 
 @app.route("/graph-img")
 def graph_img():
-    return send_file("graph.png")
+    return send_file("data/graph.png")
 
-# ================= DELETE =================
-@app.route("/delete")
-def delete():
-    if os.path.exists("attendance.csv"):
-        os.remove("attendance.csv")
-    return "<h2>Deleted</h2><a href='/admin'>Back</a>"
+# ----------- GUIDE -----------
+@app.route("/guide")
+def guide():
+    return f"""
+    {STYLE}
+    <h1>📖 How to Use FaceNova</h1>
+    <div class="container">
+    <h3>Step 1:</h3> Enter your name<br>
+    <h3>Step 2:</h3> Upload photo<br>
+    <h3>Step 3:</h3> Click Scan Face<br>
+    <h3>Step 4:</h3> Data saved automatically<br>
 
-# ================= DOWNLOAD =================
+    <h3>Admin Features:</h3>
+    View users, analytics, gallery & download CSV
+
+    <br><br>
+    <a href="/"><button>Back</button></a>
+    </div>
+    """
+
+# ----------- DOWNLOAD CSV -----------
 @app.route("/download")
 def download():
-    return send_file("attendance.csv", as_attachment=True)
+    return send_file(CSV_FILE, as_attachment=True)
 
-# ================= RUN =================
-if __name__=="__main__":
+# ----------- DELETE -----------
+@app.route("/delete")
+def delete():
+    if os.path.exists(CSV_FILE):
+        os.remove(CSV_FILE)
+
+    for f in os.listdir("data"):
+        if f.endswith(".jpg") or f.endswith(".png"):
+            os.remove(f"data/{f}")
+
+    return redirect("/admin")
+
+# ----------- RUN -----------
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
