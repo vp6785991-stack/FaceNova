@@ -5,11 +5,10 @@ import base64
 from datetime import datetime
 
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import cv2
-import numpy as np
 
 app = Flask(__name__)
 
@@ -124,7 +123,7 @@ def home():
 
     <h2>🎥 Live Camera Scan</h2>
 
-    <video id='cam' width='320' autoplay></video>
+    <video id='cam' width='320' autoplay playsinline></video>
 
     <br><br>
 
@@ -150,12 +149,14 @@ def home():
 
 <script>
 
-navigator.mediaDevices.getUserMedia({video:true})
+navigator.mediaDevices.getUserMedia({
+    video:true
+})
 .then(stream=>{
     document.getElementById('cam').srcObject = stream;
 })
 .catch(err=>{
-    alert("Camera not working");
+    alert("Camera access failed");
 });
 
 function snap(){
@@ -166,15 +167,15 @@ function snap(){
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    canvas.getContext("2d").drawImage(video,0,0);
+    let ctx = canvas.getContext("2d");
 
-    let data = canvas.toDataURL("image/jpeg",0.7);
+    ctx.drawImage(video,0,0);
+
+    let data = canvas.toDataURL("image/jpeg",0.8);
 
     document.getElementById("imgdata").value = data;
 
-    setTimeout(()=>{
-        document.getElementById("camForm").submit();
-    },300);
+    document.getElementById("camForm").submit();
 }
 
 </script>
@@ -185,33 +186,51 @@ function snap(){
 @app.route("/upload", methods=["POST"])
 def upload():
 
-    name = request.form["name"]
+    try:
 
-    files = request.files.getlist("photos")
+        name = request.form["name"]
 
-    user_dir = os.path.join(DATA_DIR, name)
+        files = request.files.getlist("photos")
 
-    os.makedirs(user_dir, exist_ok=True)
+        user_dir = os.path.join(DATA_DIR, name)
 
-    for f in files:
+        os.makedirs(user_dir, exist_ok=True)
 
-        filename = f"{datetime.now().timestamp()}.jpg"
+        for f in files:
 
-        path = os.path.join(user_dir, filename)
+            filename = f"{datetime.now().timestamp()}.jpg"
 
-        f.save(path)
+            save_path = os.path.join(user_dir, filename)
 
-    return f"""
-    {STYLE}
+            f.save(save_path)
 
-    <div class='container'>
+        return f"""
+        {STYLE}
 
-    <h2>✅ Faces Saved Successfully</h2>
+        <div class='container'>
 
-    <a href='/'><button>Back</button></a>
+        <h2>✅ Faces Saved Successfully</h2>
 
-    </div>
-    """
+        <a href='/'><button>Back</button></a>
+
+        </div>
+        """
+
+    except Exception as e:
+
+        return f"""
+        {STYLE}
+
+        <div class='container'>
+
+        <h2>Upload Error</h2>
+
+        <p>{str(e)}</p>
+
+        <a href='/'><button>Back</button></a>
+
+        </div>
+        """
 
 # -------------------- FACE DETECTION --------------------
 
@@ -252,17 +271,17 @@ def camera():
 
         full_path = os.path.join(DATA_DIR, filename)
 
-        with open(full_path,"wb") as f:
+        with open(full_path, "wb") as f:
             f.write(img_bytes)
 
         has_face = detect_face(full_path)
 
         if has_face:
+            person = "Face Detected"
             status = "Present"
-            name = "Face Detected"
         else:
+            person = "Unknown"
             status = "No Face"
-            name = "Unknown"
 
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -274,21 +293,21 @@ def camera():
 
                 rows = list(csv.reader(f))
 
-                for r in rows:
+                for row in rows:
 
-                    if len(r)>=3:
+                    if len(row) >= 3:
 
-                        if r[0] == name and r[1] == today:
+                        if row[0] == person and row[1] == today:
 
                             already_marked = True
 
         if not already_marked:
 
-            with open(ATT_FILE,"a",newline="") as f:
+            with open(ATT_FILE, "a", newline="") as f:
 
                 writer = csv.writer(f)
 
-                writer.writerow([name,today,status])
+                writer.writerow([person, today, status])
 
         return f"""
         {STYLE}
@@ -297,7 +316,7 @@ def camera():
 
         <h2>✅ Scan Complete</h2>
 
-        <h3>{name}</h3>
+        <h3>{person}</h3>
 
         <p>Status: {status}</p>
 
@@ -317,7 +336,7 @@ def camera():
 
         <div class='container'>
 
-        <h2>Error</h2>
+        <h2>Camera Error</h2>
 
         <p>{str(e)}</p>
 
@@ -331,25 +350,25 @@ def camera():
 @app.route("/cam/<file>")
 def cam(file):
 
-    return send_file(os.path.join(DATA_DIR,file))
+    return send_file(os.path.join(DATA_DIR, file))
 
 # -------------------- GALLERY --------------------
 
 @app.route("/gallery")
 def gallery():
 
-    html = ""
+    gallery_html = ""
 
     for user in os.listdir(DATA_DIR):
 
-        user_dir = os.path.join(DATA_DIR,user)
+        user_dir = os.path.join(DATA_DIR, user)
 
         if not os.path.isdir(user_dir):
             continue
 
         for img in os.listdir(user_dir):
 
-            html += f"""
+            gallery_html += f"""
 
             <div>
 
@@ -366,17 +385,17 @@ def gallery():
 
     <h1>🖼 Face Gallery</h1>
 
-    {html}
+    {gallery_html}
 
     <br>
 
-    <a href='/'><button>Home</button></a>
+    <a href='/'><button>🏠 Home</button></a>
     """
 
 @app.route("/img/<user>/<file>")
-def img(user,file):
+def img(user, file):
 
-    return send_file(os.path.join(DATA_DIR,user,file))
+    return send_file(os.path.join(DATA_DIR, user, file))
 
 # -------------------- GRAPH --------------------
 
@@ -393,21 +412,21 @@ def graph():
 
             for row in reader:
 
-                if len(row)>=3:
+                if len(row) >= 3:
 
-                    attendance[row[0]] = attendance.get(row[0],0) + 1
+                    attendance[row[0]] = attendance.get(row[0], 0) + 1
 
     plt.figure(figsize=(7,5))
 
     plt.bar(attendance.keys(), attendance.values())
 
-    plt.xlabel("Names")
+    plt.xlabel("Users")
 
     plt.ylabel("Scans")
 
     plt.title("Attendance Graph")
 
-    graph_path = os.path.join(DATA_DIR,"graph.png")
+    graph_path = os.path.join(DATA_DIR, "graph.png")
 
     plt.savefig(graph_path)
 
@@ -422,20 +441,20 @@ def graph():
 
     <br>
 
-    <a href='/'><button>Home</button></a>
+    <a href='/'><button>🏠 Home</button></a>
     """
 
 @app.route("/graph-image")
 def graph_image():
 
-    return send_file(os.path.join(DATA_DIR,"graph.png"))
+    return send_file(os.path.join(DATA_DIR, "graph.png"))
 
 # -------------------- ADMIN --------------------
 
 @app.route("/admin")
 def admin():
 
-    rows = ""
+    table_rows = ""
 
     if os.path.exists(ATT_FILE):
 
@@ -443,19 +462,19 @@ def admin():
 
             reader = csv.reader(f)
 
-            for r in reader:
+            for row in reader:
 
-                if len(r)>=3:
+                if len(row) >= 3:
 
-                    rows += f"""
+                    table_rows += f"""
 
                     <tr>
 
-                    <td>{r[0]}</td>
+                    <td>{row[0]}</td>
 
-                    <td>{r[1]}</td>
+                    <td>{row[1]}</td>
 
-                    <td>{r[2]}</td>
+                    <td>{row[2]}</td>
 
                     </tr>
 
@@ -478,7 +497,7 @@ def admin():
 
     </tr>
 
-    {rows}
+    {table_rows}
 
     </table>
 
@@ -500,39 +519,57 @@ def download():
 
         return send_file(ATT_FILE, as_attachment=True)
 
-    return "No CSV Found"
+    return "No CSV file found"
 
 # -------------------- DELETE --------------------
 
 @app.route("/delete")
 def delete():
 
-    if os.path.exists(ATT_FILE):
+    try:
 
-        os.remove(ATT_FILE)
+        if os.path.exists(ATT_FILE):
 
-    for root, dirs, files in os.walk(DATA_DIR):
+            os.remove(ATT_FILE)
 
-        for file in files:
+        for root, dirs, files in os.walk(DATA_DIR):
 
-            if file.endswith(".jpg") or file.endswith(".png"):
+            for file in files:
 
-                try:
-                    os.remove(os.path.join(root,file))
-                except:
-                    pass
+                if file.endswith(".jpg") or file.endswith(".png"):
 
-    return f"""
-    {STYLE}
+                    try:
+                        os.remove(os.path.join(root, file))
+                    except:
+                        pass
 
-    <div class='container'>
+        return f"""
+        {STYLE}
 
-    <h2>🗑 Data Deleted Successfully</h2>
+        <div class='container'>
 
-    <a href='/admin'><button>Back</button></a>
+        <h2>🗑 Data Deleted Successfully</h2>
 
-    </div>
-    """
+        <a href='/admin'><button>Back</button></a>
+
+        </div>
+        """
+
+    except Exception as e:
+
+        return f"""
+        {STYLE}
+
+        <div class='container'>
+
+        <h2>Delete Error</h2>
+
+        <p>{str(e)}</p>
+
+        <a href='/admin'><button>Back</button></a>
+
+        </div>
+        """
 
 # -------------------- RUN --------------------
 
