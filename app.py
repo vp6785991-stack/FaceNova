@@ -1,232 +1,545 @@
 from flask import Flask, request, redirect, send_file
-import os, csv, base64
+import os
+import csv
+import base64
 from datetime import datetime
+
+import matplotlib
+matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
+import face_recognition
 
 app = Flask(__name__)
 
+# -------------------- FOLDERS --------------------
+
 DATA_DIR = "data"
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-CSV_FILE = f"{DATA_DIR}/data.csv"
+ATT_FILE = os.path.join(DATA_DIR, "attendance.csv")
 
-# ---------- UI ----------
+# -------------------- STYLE --------------------
+
 STYLE = """
 <style>
 body{
-margin:0;
-font-family:sans-serif;
-color:white;
-text-align:center;
-background: linear-gradient(135deg,#020617,#0f172a,#1e3a8a,#9333ea);
+    margin:0;
+    font-family:Arial;
+    text-align:center;
+    color:white;
+    background: linear-gradient(135deg,#020617,#0f172a,#1e3a8a,#9333ea);
 }
+
 .container{
-margin:20px;
-padding:20px;
-background:rgba(0,0,0,0.6);
-border-radius:20px;
+    width:90%;
+    max-width:700px;
+    margin:auto;
+    margin-top:20px;
+    padding:20px;
+    background:rgba(0,0,0,0.5);
+    border-radius:20px;
 }
+
 button{
-padding:10px;
-margin:5px;
-border:none;
-border-radius:10px;
-background:#22c55e;
-color:white;
+    padding:10px 20px;
+    border:none;
+    border-radius:10px;
+    background:#22c55e;
+    color:white;
+    cursor:pointer;
+    margin:5px;
 }
-img{border-radius:10px;margin:5px;}
+
+input{
+    padding:10px;
+    border-radius:10px;
+    border:none;
+}
+
+table{
+    margin:auto;
+    background:white;
+    color:black;
+}
+
+img{
+    border-radius:10px;
+    margin:10px;
+}
+
+h1{
+    color:#60a5fa;
+}
 </style>
 """
 
-# ---------- HOME ----------
+# -------------------- HOME --------------------
+
 @app.route("/")
 def home():
+
     return f"""
     {STYLE}
-    <h1>🚀 FaceNova Ultra PRO</h1>
 
-    <div class="container">
-    <h3>Upload Face (Training)</h3>
-    <form action="/upload" method="post" enctype="multipart/form-data">
-        <input name="name" placeholder="Enter Name" required><br><br>
-        <input type="file" name="photos" multiple required><br><br>
-        <button>📸 Save Faces</button>
+    <h1>🚀 FaceNova Ultra AI</h1>
+
+    <div class='container'>
+
+    <h2>📸 Upload Student Faces</h2>
+
+    <form action='/upload' method='post' enctype='multipart/form-data'>
+
+        <input type='text' name='name' placeholder='Enter Student Name' required>
+
+        <br><br>
+
+        <input type='file' name='photos' multiple required>
+
+        <br><br>
+
+        <button type='submit'>Save Faces</button>
+
     </form>
 
-    <h3>Live Camera Scan</h3>
-    <video id="cam" width="250" autoplay></video><br>
-    <button onclick="snap()">Scan Face</button>
+    <hr>
 
-    <canvas id="canvas" style="display:none;"></canvas>
+    <h2>🎥 Live Face Scan</h2>
 
-    <form id="camForm" action="/camera" method="post">
-        <input type="hidden" name="img" id="imgdata">
+    <video id='cam' width='300' autoplay></video>
+
+    <br><br>
+
+    <button onclick='snap()'>Scan Face</button>
+
+    <canvas id='canvas' style='display:none;'></canvas>
+
+    <form id='camForm' action='/camera' method='post'>
+
+        <input type='hidden' name='img' id='imgdata'>
+
     </form>
 
     <br>
-    <a href="/admin"><button>⚙️ Admin</button></a>
-    <a href="/gallery"><button>🖼 Gallery</button></a>
-    <a href="/graph"><button>📊 Graph</button></a>
+
+    <a href='/gallery'><button>🖼 Gallery</button></a>
+
+    <a href='/graph'><button>📊 Graph</button></a>
+
+    <a href='/admin'><button>⚙️ Admin</button></a>
+
     </div>
 
 <script>
+
 navigator.mediaDevices.getUserMedia({video:true})
-.then(stream=>{document.getElementById('cam').srcObject=stream})
+.then(stream=>{
+    document.getElementById('cam').srcObject = stream;
+})
+.catch(err=>{
+    alert("Camera not working");
+});
 
 function snap(){
-let canvas=document.getElementById("canvas");
-let video=document.getElementById("cam");
 
-canvas.width=video.videoWidth;
-canvas.height=video.videoHeight;
-canvas.getContext("2d").drawImage(video,0,0);
+    let canvas = document.getElementById("canvas");
+    let video = document.getElementById("cam");
 
-// compress image (IMPORTANT FIX)
-let data=canvas.toDataURL("image/jpeg",0.7);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-document.getElementById("imgdata").value=data;
+    canvas.getContext("2d").drawImage(video,0,0);
 
-// small delay to avoid crash
-setTimeout(()=>{
-document.getElementById("camForm").submit();
-},300);
+    let data = canvas.toDataURL("image/jpeg",0.7);
+
+    document.getElementById("imgdata").value = data;
+
+    setTimeout(()=>{
+        document.getElementById("camForm").submit();
+    },300);
+
 }
+
 </script>
 """
 
-# ---------- UPLOAD ----------
+# -------------------- UPLOAD --------------------
+
 @app.route("/upload", methods=["POST"])
 def upload():
-    files = request.files.getlist("photos")
+
     name = request.form["name"]
 
-    user_dir = f"{DATA_DIR}/{name}"
+    files = request.files.getlist("photos")
+
+    user_dir = os.path.join(DATA_DIR, name)
+
     os.makedirs(user_dir, exist_ok=True)
 
-    preview = ""
-
     for f in files:
-        path = f"{user_dir}/{datetime.now().timestamp()}.jpg"
-        f.save(path)
-        preview += f'<img src="/img/{name}/{os.path.basename(path)}" width="100">'
 
-    return f"{STYLE}<h2>Saved!</h2>{preview}<br><a href='/'>Back</a>"
+        filename = f"{datetime.now().timestamp()}.jpg"
 
-# ---------- MATCH (SAFE DEMO) ----------
-def match_face():
-    users = [u for u in os.listdir(DATA_DIR) if os.path.isdir(f"{DATA_DIR}/{u}")]
-    return users[0] if users else "Unknown"
+        save_path = os.path.join(user_dir, filename)
 
-# ---------- CAMERA FIXED ----------
+        f.save(save_path)
+
+    return f"""
+    {STYLE}
+    <div class='container'>
+    <h2>✅ Faces Saved Successfully</h2>
+    <a href='/'><button>Back</button></a>
+    </div>
+    """
+
+# -------------------- REAL FACE MATCH --------------------
+
+def match_face(captured_image_path):
+
+    try:
+
+        unknown_image = face_recognition.load_image_file(captured_image_path)
+
+        unknown_encodings = face_recognition.face_encodings(unknown_image)
+
+        if len(unknown_encodings) == 0:
+            return "No Face Detected"
+
+        unknown_encoding = unknown_encodings[0]
+
+        for user in os.listdir(DATA_DIR):
+
+            user_dir = os.path.join(DATA_DIR, user)
+
+            if not os.path.isdir(user_dir):
+                continue
+
+            for img_name in os.listdir(user_dir):
+
+                img_path = os.path.join(user_dir, img_name)
+
+                try:
+
+                    known_image = face_recognition.load_image_file(img_path)
+
+                    known_encodings = face_recognition.face_encodings(known_image)
+
+                    if len(known_encodings) == 0:
+                        continue
+
+                    known_encoding = known_encodings[0]
+
+                    result = face_recognition.compare_faces(
+                        [known_encoding],
+                        unknown_encoding,
+                        tolerance=0.5
+                    )
+
+                    if result[0]:
+                        return user
+
+                except:
+                    continue
+
+        return "Unknown"
+
+    except Exception as e:
+
+        return f"Error: {str(e)}"
+
+# -------------------- CAMERA --------------------
+
 @app.route("/camera", methods=["POST"])
 def camera():
+
     try:
+
         data = request.form.get("img")
 
         if not data:
-            return f"{STYLE}<h3>No image ❌</h3><a href='/'>Back</a>"
+            return "No image"
 
-        header, encoded = data.split(",", 1)
+        header, encoded = data.split(",",1)
+
         img_bytes = base64.b64decode(encoded)
 
-        filename = f"{DATA_DIR}/cam_{datetime.now().timestamp()}.jpg"
-        with open(filename, "wb") as f:
+        filename = f"cam_{datetime.now().timestamp()}.jpg"
+
+        full_path = os.path.join(DATA_DIR, filename)
+
+        with open(full_path,"wb") as f:
             f.write(img_bytes)
 
-        name = match_face()
+        name = match_face(full_path)
 
-        with open(CSV_FILE, "a", newline="") as f:
-            csv.writer(f).writerow([name, datetime.now().strftime("%d-%m-%Y %H:%M:%S")])
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        already_marked = False
+
+        rows = []
+
+        if os.path.exists(ATT_FILE):
+
+            with open(ATT_FILE) as f:
+                rows = list(csv.reader(f))
+
+        for r in rows:
+
+            if len(r)>=3:
+
+                if r[0] == name and r[1] == today:
+
+                    already_marked = True
+
+        if not already_marked:
+
+            with open(ATT_FILE,"a",newline="") as f:
+
+                writer = csv.writer(f)
+
+                writer.writerow([name,today,"Present"])
 
         return f"""
         {STYLE}
-        <h2>✅ Face Scanned</h2>
-        <p>Detected: {name}</p>
-        <img src="/img_file/{os.path.basename(filename)}" width="200">
+
+        <div class='container'>
+
+        <h2>✅ Attendance Marked</h2>
+
+        <h3>{name}</h3>
+
+        <img src='/cam/{filename}' width='250'>
+
         <br><br>
-        <a href="/">Back</a>
+
+        <a href='/'><button>Back</button></a>
+
+        </div>
         """
 
     except Exception as e:
-        return f"{STYLE}<h3>Error: {str(e)}</h3><a href='/'>Back</a>"
 
-@app.route("/img_file/<filename>")
-def img_file(filename):
-    return send_file(f"{DATA_DIR}/{filename}")
+        return f"""
+        {STYLE}
+        <div class='container'>
+        <h2>Error</h2>
+        <p>{str(e)}</p>
+        <a href='/'><button>Back</button></a>
+        </div>
+        """
 
-# ---------- GALLERY ----------
+# -------------------- SHOW CAMERA IMAGE --------------------
+
+@app.route("/cam/<file>")
+def cam(file):
+
+    return send_file(os.path.join(DATA_DIR,file))
+
+# -------------------- GALLERY --------------------
+
 @app.route("/gallery")
 def gallery():
-    imgs = ""
-    for user in os.listdir(DATA_DIR):
-        path = f"{DATA_DIR}/{user}"
-        if os.path.isdir(path):
-            for f in os.listdir(path):
-                imgs += f'<img src="/img/{user}/{f}" width="100">'
 
-    return f"{STYLE}<h2>Gallery</h2>{imgs}<br><a href='/'>Back</a>"
+    images = ""
+
+    for user in os.listdir(DATA_DIR):
+
+        user_dir = os.path.join(DATA_DIR,user)
+
+        if not os.path.isdir(user_dir):
+            continue
+
+        for img in os.listdir(user_dir):
+
+            images += f"""
+
+            <div>
+
+            <h3>{user}</h3>
+
+            <img src='/img/{user}/{img}' width='150'>
+
+            </div>
+
+            """
+
+    return f"""
+    {STYLE}
+
+    <h1>🖼 Face Gallery</h1>
+
+    {images}
+
+    <br>
+
+    <a href='/'><button>Home</button></a>
+    """
 
 @app.route("/img/<user>/<file>")
-def img(user, file):
-    return send_file(f"{DATA_DIR}/{user}/{file}")
+def img(user,file):
 
-# ---------- GRAPH ----------
+    return send_file(os.path.join(DATA_DIR,user,file))
+
+# -------------------- GRAPH --------------------
+
 @app.route("/graph")
 def graph():
-    data = {}
 
-    if os.path.exists(CSV_FILE):
-        with open(CSV_FILE) as f:
-            for row in csv.reader(f):
-                data[row[0]] = data.get(row[0], 0) + 1
+    attendance = {}
 
-    plt.figure()
-    plt.bar(data.keys(), data.values())
-    plt.savefig(f"{DATA_DIR}/bar.png")
+    if os.path.exists(ATT_FILE):
 
-    plt.figure()
-    plt.plot(list(data.keys()), list(data.values()))
-    plt.savefig(f"{DATA_DIR}/line.png")
+        with open(ATT_FILE) as f:
+
+            reader = csv.reader(f)
+
+            for row in reader:
+
+                if len(row)>=3:
+
+                    if row[2] == "Present":
+
+                        attendance[row[0]] = attendance.get(row[0],0) + 1
+
+    plt.figure(figsize=(7,5))
+
+    plt.bar(attendance.keys(), attendance.values())
+
+    plt.xlabel("Students")
+
+    plt.ylabel("Days Present")
+
+    plt.title("Attendance Graph")
+
+    graph_path = os.path.join(DATA_DIR,"graph.png")
+
+    plt.savefig(graph_path)
+
+    plt.close()
 
     return f"""
     {STYLE}
-    <h2>Graphs</h2>
-    <img src="/graph-img/bar.png" width="300"><br>
-    <img src="/graph-img/line.png" width="300">
-    <br><a href='/'>Back</a>
+
+    <h1>📊 Attendance Graph</h1>
+
+    <img src='/graph-image' width='500'>
+
+    <br>
+
+    <a href='/'><button>Home</button></a>
     """
 
-@app.route("/graph-img/<file>")
-def graph_img(file):
-    return send_file(f"{DATA_DIR}/{file}")
+@app.route("/graph-image")
+def graph_image():
 
-# ---------- ADMIN ----------
+    return send_file(os.path.join(DATA_DIR,"graph.png"))
+
+# -------------------- ADMIN --------------------
+
 @app.route("/admin")
 def admin():
+
     rows = ""
-    if os.path.exists(CSV_FILE):
-        with open(CSV_FILE) as f:
-            for r in csv.reader(f):
-                rows += f"<tr><td>{r[0]}</td><td>{r[1]}</td></tr>"
+
+    if os.path.exists(ATT_FILE):
+
+        with open(ATT_FILE) as f:
+
+            reader = csv.reader(f)
+
+            for r in reader:
+
+                if len(r)>=3:
+
+                    rows += f"""
+
+                    <tr>
+
+                    <td>{r[0]}</td>
+
+                    <td>{r[1]}</td>
+
+                    <td>{r[2]}</td>
+
+                    </tr>
+
+                    """
 
     return f"""
     {STYLE}
-    <h2>Admin Panel</h2>
-    <table border="1" style="margin:auto;">
-    <tr><th>Name</th><th>Date-Time</th></tr>
+
+    <h1>⚙️ Admin Panel</h1>
+
+    <table border='1' cellpadding='10'>
+
+    <tr>
+
+    <th>Name</th>
+
+    <th>Date</th>
+
+    <th>Status</th>
+
+    </tr>
+
     {rows}
+
     </table>
+
     <br>
-    <a href="/download"><button>Download CSV</button></a>
-    <a href="/"><button>Home</button></a>
+
+    <a href='/download'><button>⬇ Download CSV</button></a>
+
+    <a href='/delete'><button>🗑 Delete Data</button></a>
+
+    <a href='/'><button>🏠 Home</button></a>
     """
 
-# ---------- DOWNLOAD ----------
+# -------------------- DOWNLOAD CSV --------------------
+
 @app.route("/download")
 def download():
-    return send_file(CSV_FILE, as_attachment=True)
 
-# ---------- RUN ----------
+    if os.path.exists(ATT_FILE):
+
+        return send_file(ATT_FILE, as_attachment=True)
+
+    return "No attendance file"
+
+# -------------------- DELETE --------------------
+
+@app.route("/delete")
+def delete():
+
+    if os.path.exists(ATT_FILE):
+
+        os.remove(ATT_FILE)
+
+    for root, dirs, files in os.walk(DATA_DIR):
+
+        for file in files:
+
+            if file.endswith(".jpg") or file.endswith(".png"):
+
+                try:
+                    os.remove(os.path.join(root,file))
+                except:
+                    pass
+
+    return f"""
+    {STYLE}
+
+    <div class='container'>
+
+    <h2>🗑 All Data Deleted</h2>
+
+    <a href='/admin'><button>Back</button></a>
+
+    </div>
+    """
+
+# -------------------- RUN --------------------
+
 if __name__ == "__main__":
+
     app.run(host="0.0.0.0", port=10000)
