@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, send_file
+from flask import Flask, request, send_file
 import os
 import csv
 import base64
@@ -8,7 +8,8 @@ import matplotlib
 matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
-import face_recognition
+import cv2
+import numpy as np
 
 app = Flask(__name__)
 
@@ -19,10 +20,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 ATT_FILE = os.path.join(DATA_DIR, "attendance.csv")
 
+# -------------------- FACE DETECTOR --------------------
+
+face_detector = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
 # -------------------- STYLE --------------------
 
 STYLE = """
 <style>
+
 body{
     margin:0;
     font-family:Arial;
@@ -33,11 +41,11 @@ body{
 
 .container{
     width:90%;
-    max-width:700px;
+    max-width:750px;
     margin:auto;
     margin-top:20px;
     padding:20px;
-    background:rgba(0,0,0,0.5);
+    background:rgba(0,0,0,0.55);
     border-radius:20px;
 }
 
@@ -49,6 +57,10 @@ button{
     color:white;
     cursor:pointer;
     margin:5px;
+}
+
+button:hover{
+    opacity:0.9;
 }
 
 input{
@@ -68,9 +80,15 @@ img{
     margin:10px;
 }
 
+video{
+    border-radius:15px;
+    border:3px solid white;
+}
+
 h1{
     color:#60a5fa;
 }
+
 </style>
 """
 
@@ -104,13 +122,13 @@ def home():
 
     <hr>
 
-    <h2>🎥 Live Face Scan</h2>
+    <h2>🎥 Live Camera Scan</h2>
 
-    <video id='cam' width='300' autoplay></video>
+    <video id='cam' width='320' autoplay></video>
 
     <br><br>
 
-    <button onclick='snap()'>Scan Face</button>
+    <button onclick='snap()'>📷 Scan Face</button>
 
     <canvas id='canvas' style='display:none;'></canvas>
 
@@ -157,7 +175,6 @@ function snap(){
     setTimeout(()=>{
         document.getElementById("camForm").submit();
     },300);
-
 }
 
 </script>
@@ -180,72 +197,40 @@ def upload():
 
         filename = f"{datetime.now().timestamp()}.jpg"
 
-        save_path = os.path.join(user_dir, filename)
+        path = os.path.join(user_dir, filename)
 
-        f.save(save_path)
+        f.save(path)
 
     return f"""
     {STYLE}
+
     <div class='container'>
+
     <h2>✅ Faces Saved Successfully</h2>
+
     <a href='/'><button>Back</button></a>
+
     </div>
     """
 
-# -------------------- REAL FACE MATCH --------------------
+# -------------------- FACE DETECTION --------------------
 
-def match_face(captured_image_path):
+def detect_face(image_path):
 
-    try:
+    img = cv2.imread(image_path)
 
-        unknown_image = face_recognition.load_image_file(captured_image_path)
+    if img is None:
+        return False
 
-        unknown_encodings = face_recognition.face_encodings(unknown_image)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        if len(unknown_encodings) == 0:
-            return "No Face Detected"
+    faces = face_detector.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5
+    )
 
-        unknown_encoding = unknown_encodings[0]
-
-        for user in os.listdir(DATA_DIR):
-
-            user_dir = os.path.join(DATA_DIR, user)
-
-            if not os.path.isdir(user_dir):
-                continue
-
-            for img_name in os.listdir(user_dir):
-
-                img_path = os.path.join(user_dir, img_name)
-
-                try:
-
-                    known_image = face_recognition.load_image_file(img_path)
-
-                    known_encodings = face_recognition.face_encodings(known_image)
-
-                    if len(known_encodings) == 0:
-                        continue
-
-                    known_encoding = known_encodings[0]
-
-                    result = face_recognition.compare_faces(
-                        [known_encoding],
-                        unknown_encoding,
-                        tolerance=0.5
-                    )
-
-                    if result[0]:
-                        return user
-
-                except:
-                    continue
-
-        return "Unknown"
-
-    except Exception as e:
-
-        return f"Error: {str(e)}"
+    return len(faces) > 0
 
 # -------------------- CAMERA --------------------
 
@@ -257,7 +242,7 @@ def camera():
         data = request.form.get("img")
 
         if not data:
-            return "No image"
+            return "No image received"
 
         header, encoded = data.split(",",1)
 
@@ -270,26 +255,32 @@ def camera():
         with open(full_path,"wb") as f:
             f.write(img_bytes)
 
-        name = match_face(full_path)
+        has_face = detect_face(full_path)
+
+        if has_face:
+            status = "Present"
+            name = "Face Detected"
+        else:
+            status = "No Face"
+            name = "Unknown"
 
         today = datetime.now().strftime("%Y-%m-%d")
 
         already_marked = False
 
-        rows = []
-
         if os.path.exists(ATT_FILE):
 
             with open(ATT_FILE) as f:
+
                 rows = list(csv.reader(f))
 
-        for r in rows:
+                for r in rows:
 
-            if len(r)>=3:
+                    if len(r)>=3:
 
-                if r[0] == name and r[1] == today:
+                        if r[0] == name and r[1] == today:
 
-                    already_marked = True
+                            already_marked = True
 
         if not already_marked:
 
@@ -297,16 +288,18 @@ def camera():
 
                 writer = csv.writer(f)
 
-                writer.writerow([name,today,"Present"])
+                writer.writerow([name,today,status])
 
         return f"""
         {STYLE}
 
         <div class='container'>
 
-        <h2>✅ Attendance Marked</h2>
+        <h2>✅ Scan Complete</h2>
 
         <h3>{name}</h3>
+
+        <p>Status: {status}</p>
 
         <img src='/cam/{filename}' width='250'>
 
@@ -321,10 +314,15 @@ def camera():
 
         return f"""
         {STYLE}
+
         <div class='container'>
+
         <h2>Error</h2>
+
         <p>{str(e)}</p>
+
         <a href='/'><button>Back</button></a>
+
         </div>
         """
 
@@ -340,7 +338,7 @@ def cam(file):
 @app.route("/gallery")
 def gallery():
 
-    images = ""
+    html = ""
 
     for user in os.listdir(DATA_DIR):
 
@@ -351,7 +349,7 @@ def gallery():
 
         for img in os.listdir(user_dir):
 
-            images += f"""
+            html += f"""
 
             <div>
 
@@ -368,7 +366,7 @@ def gallery():
 
     <h1>🖼 Face Gallery</h1>
 
-    {images}
+    {html}
 
     <br>
 
@@ -397,17 +395,15 @@ def graph():
 
                 if len(row)>=3:
 
-                    if row[2] == "Present":
-
-                        attendance[row[0]] = attendance.get(row[0],0) + 1
+                    attendance[row[0]] = attendance.get(row[0],0) + 1
 
     plt.figure(figsize=(7,5))
 
     plt.bar(attendance.keys(), attendance.values())
 
-    plt.xlabel("Students")
+    plt.xlabel("Names")
 
-    plt.ylabel("Days Present")
+    plt.ylabel("Scans")
 
     plt.title("Attendance Graph")
 
@@ -495,7 +491,7 @@ def admin():
     <a href='/'><button>🏠 Home</button></a>
     """
 
-# -------------------- DOWNLOAD CSV --------------------
+# -------------------- DOWNLOAD --------------------
 
 @app.route("/download")
 def download():
@@ -504,7 +500,7 @@ def download():
 
         return send_file(ATT_FILE, as_attachment=True)
 
-    return "No attendance file"
+    return "No CSV Found"
 
 # -------------------- DELETE --------------------
 
@@ -531,7 +527,7 @@ def delete():
 
     <div class='container'>
 
-    <h2>🗑 All Data Deleted</h2>
+    <h2>🗑 Data Deleted Successfully</h2>
 
     <a href='/admin'><button>Back</button></a>
 
