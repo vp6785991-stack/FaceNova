@@ -3,19 +3,22 @@ import os
 import csv
 import base64
 from datetime import datetime
-
-import matplotlib
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import cv2
+import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 app = Flask(__name__)
 
 # -------------------- FOLDERS --------------------
 
 DATA_DIR = "data"
+GRAPH_DIR = "graphs"
+
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(GRAPH_DIR, exist_ok=True)
 
 ATT_FILE = os.path.join(DATA_DIR, "attendance.csv")
 
@@ -33,59 +36,124 @@ STYLE = """
 body{
     margin:0;
     font-family:Arial;
-    text-align:center;
+    background:linear-gradient(135deg,#0f172a,#1e3a8a,#312e81);
     color:white;
-    background: linear-gradient(135deg,#020617,#0f172a,#1e3a8a,#9333ea);
+    min-height:100vh;
 }
 
 .container{
     width:90%;
-    max-width:750px;
+    max-width:1000px;
     margin:auto;
     margin-top:20px;
-    padding:20px;
-    background:rgba(0,0,0,0.55);
-    border-radius:20px;
+    background:rgba(255,255,255,0.08);
+    padding:25px;
+    border-radius:25px;
+    backdrop-filter:blur(12px);
+    box-shadow:0 0 25px rgba(0,0,0,0.4);
+}
+
+h1,h2,h3{
+    text-align:center;
 }
 
 button{
-    padding:10px 20px;
+    padding:12px 22px;
     border:none;
-    border-radius:10px;
-    background:#22c55e;
+    border-radius:15px;
+    background:linear-gradient(45deg,#2563eb,#7c3aed);
     color:white;
     cursor:pointer;
-    margin:5px;
+    margin:8px;
+    font-size:15px;
+    transition:0.3s;
 }
 
 button:hover{
+    transform:scale(1.05);
     opacity:0.9;
 }
 
 input{
-    padding:10px;
-    border-radius:10px;
+    padding:12px;
     border:none;
+    border-radius:12px;
+    width:90%;
+    margin:8px;
 }
 
-table{
-    margin:auto;
-    background:white;
-    color:black;
+.card-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:20px;
+    margin-top:25px;
+}
+
+.card{
+    background:rgba(255,255,255,0.08);
+    padding:20px;
+    border-radius:20px;
+    text-align:center;
 }
 
 img{
-    border-radius:10px;
+    border-radius:15px;
     margin:10px;
 }
 
 video{
-    border-radius:15px;
+    border-radius:20px;
     border:3px solid white;
 }
 
-h1{
-    color:#60a5fa;
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:20px;
+}
+
+th,td{
+    border:1px solid rgba(255,255,255,0.2);
+    padding:12px;
+    text-align:center;
+}
+
+th{
+    background:#1e40af;
+}
+
+.present{
+    background:green;
+}
+
+.absent{
+    background:red;
+}
+
+.calendar{
+    display:grid;
+    grid-template-columns:repeat(7,1fr);
+    gap:10px;
+    margin-top:20px;
+}
+
+.day{
+    padding:15px;
+    border-radius:12px;
+    text-align:center;
+    font-weight:bold;
+}
+
+.green{
+    background:green;
+}
+
+.red{
+    background:red;
+}
+
+.gray{
+    background:gray;
 }
 
 </style>
@@ -96,26 +164,60 @@ h1{
 @app.route("/")
 def home():
 
+    total_students = len([
+        x for x in os.listdir(DATA_DIR)
+        if os.path.isdir(os.path.join(DATA_DIR, x))
+    ])
+
+    total_attendance = 0
+
+    if os.path.exists(ATT_FILE):
+        with open(ATT_FILE) as f:
+            total_attendance = len(list(csv.reader(f)))
+
     return f"""
     {STYLE}
 
-    <h1>🚀 FaceNova Ultra AI</h1>
-
     <div class='container'>
+
+    <h1>🚀 FaceNova AI</h1>
+
+    <h3>Smart AI Attendance & Authentication System</h3>
+
+    <div class='card-grid'>
+
+        <div class='card'>
+            <h2>{total_students}</h2>
+            <p>Registered Students</p>
+        </div>
+
+        <div class='card'>
+            <h2>{total_attendance}</h2>
+            <p>Total Attendance</p>
+        </div>
+
+        <div class='card'>
+            <h2>AI</h2>
+            <p>Live Face Scan</p>
+        </div>
+
+    </div>
+
+    <hr>
 
     <h2>📸 Upload Student Faces</h2>
 
-    <form action='/upload' method='post' enctype='multipart/form-data'>
+    <form action='/upload' method='POST' enctype='multipart/form-data'>
 
-        <input type='text' name='name' placeholder='Enter Student Name' required>
+    <input type='text' name='name' placeholder='Student Name' required>
 
-        <br><br>
+    <br>
 
-        <input type='file' name='photos' multiple required>
+    <input type='file' name='photos' multiple required>
 
-        <br><br>
+    <br>
 
-        <button type='submit'>Save Faces</button>
+    <button type='submit'>Upload Faces</button>
 
     </form>
 
@@ -131,40 +233,48 @@ def home():
 
     <canvas id='canvas' style='display:none;'></canvas>
 
-    <form id='camForm' action='/camera' method='post'>
+    <form id='camForm' action='/camera' method='POST'>
 
         <input type='hidden' name='img' id='imgdata'>
 
     </form>
 
-    <br>
+    <hr>
+
+    <div style='text-align:center;'>
 
     <a href='/gallery'><button>🖼 Gallery</button></a>
 
     <a href='/graph'><button>📊 Graph</button></a>
 
-    <a href='/admin'><button>⚙️ Admin</button></a>
+    <a href='/calendar'><button>📅 Calendar</button></a>
+
+    <a href='/admin'><button>⚙ Admin</button></a>
+
+    </div>
 
     </div>
 
 <script>
 
-navigator.mediaDevices.getUserMedia({
+navigator.mediaDevices.getUserMedia({{
     video:true
-})
-.then(stream=>{
+}})
+.then(stream=>{{
     document.getElementById('cam').srcObject = stream;
-})
-.catch(err=>{
+}})
+.catch(err=>{{
     alert("Camera access failed");
-});
+}});
 
-function snap(){
+function snap(){{
 
-    let canvas = document.getElementById("canvas");
     let video = document.getElementById("cam");
 
+    let canvas = document.getElementById("canvas");
+
     canvas.width = video.videoWidth;
+
     canvas.height = video.videoHeight;
 
     let ctx = canvas.getContext("2d");
@@ -176,7 +286,8 @@ function snap(){
     document.getElementById("imgdata").value = data;
 
     document.getElementById("camForm").submit();
-}
+
+}}
 
 </script>
 """
@@ -209,9 +320,9 @@ def upload():
 
         <div class='container'>
 
-        <h2>✅ Faces Saved Successfully</h2>
+        <h2>✅ Faces Uploaded Successfully</h2>
 
-        <a href='/'><button>Back</button></a>
+        <a href='/'><button>🏠 Home</button></a>
 
         </div>
         """
@@ -226,8 +337,6 @@ def upload():
         <h2>Upload Error</h2>
 
         <p>{str(e)}</p>
-
-        <a href='/'><button>Back</button></a>
 
         </div>
         """
@@ -263,11 +372,11 @@ def camera():
         if not data:
             return "No image received"
 
-        header, encoded = data.split(",",1)
+        header, encoded = data.split(",", 1)
 
         img_bytes = base64.b64decode(encoded)
 
-        filename = f"cam_{datetime.now().timestamp()}.jpg"
+        filename = f"camera_{datetime.now().timestamp()}.jpg"
 
         full_path = os.path.join(DATA_DIR, filename)
 
@@ -281,33 +390,15 @@ def camera():
             status = "Present"
         else:
             person = "Unknown"
-            status = "No Face"
+            status = "Absent"
 
         today = datetime.now().strftime("%Y-%m-%d")
 
-        already_marked = False
+        with open(ATT_FILE, "a", newline="") as f:
 
-        if os.path.exists(ATT_FILE):
+            writer = csv.writer(f)
 
-            with open(ATT_FILE) as f:
-
-                rows = list(csv.reader(f))
-
-                for row in rows:
-
-                    if len(row) >= 3:
-
-                        if row[0] == person and row[1] == today:
-
-                            already_marked = True
-
-        if not already_marked:
-
-            with open(ATT_FILE, "a", newline="") as f:
-
-                writer = csv.writer(f)
-
-                writer.writerow([person, today, status])
+            writer.writerow([person, today, status])
 
         return f"""
         {STYLE}
@@ -320,11 +411,11 @@ def camera():
 
         <p>Status: {status}</p>
 
-        <img src='/cam/{filename}' width='250'>
+        <img src='/cam/{filename}' width='260'>
 
         <br><br>
 
-        <a href='/'><button>Back</button></a>
+        <a href='/'><button>🏠 Home</button></a>
 
         </div>
         """
@@ -340,12 +431,10 @@ def camera():
 
         <p>{str(e)}</p>
 
-        <a href='/'><button>Back</button></a>
-
         </div>
         """
 
-# -------------------- SHOW CAMERA IMAGE --------------------
+# -------------------- CAMERA IMAGE --------------------
 
 @app.route("/cam/<file>")
 def cam(file):
@@ -370,27 +459,36 @@ def gallery():
 
             gallery_html += f"""
 
-            <div>
+            <div class='card'>
 
             <h3>{user}</h3>
 
-            <img src='/img/{user}/{img}' width='150'>
+            <img src='/img/{user}/{img}' width='220'>
 
             </div>
-
             """
 
     return f"""
     {STYLE}
 
+    <div class='container'>
+
     <h1>🖼 Face Gallery</h1>
 
+    <div class='card-grid'>
+
     {gallery_html}
+
+    </div>
 
     <br>
 
     <a href='/'><button>🏠 Home</button></a>
+
+    </div>
     """
+
+# -------------------- IMAGE ROUTE --------------------
 
 @app.route("/img/<user>/<file>")
 def img(user, file):
@@ -422,32 +520,96 @@ def graph():
 
     plt.xlabel("Users")
 
-    plt.ylabel("Scans")
+    plt.ylabel("Attendance")
 
-    plt.title("Attendance Graph")
+    plt.title("FaceNova Analytics")
 
-    graph_path = os.path.join(DATA_DIR, "graph.png")
+    graph_path = os.path.join(GRAPH_DIR, "graph.png")
 
     plt.savefig(graph_path)
-
-    plt.close()
 
     return f"""
     {STYLE}
 
+    <div class='container'>
+
     <h1>📊 Attendance Graph</h1>
 
-    <img src='/graph-image' width='500'>
+    <img src='/graph-image' width='100%'>
 
     <br>
 
     <a href='/'><button>🏠 Home</button></a>
+
+    </div>
     """
+
+# -------------------- GRAPH IMAGE --------------------
 
 @app.route("/graph-image")
 def graph_image():
 
-    return send_file(os.path.join(DATA_DIR, "graph.png"))
+    return send_file(os.path.join(GRAPH_DIR, "graph.png"))
+
+# -------------------- CALENDAR --------------------
+
+@app.route("/calendar")
+def calendar():
+
+    records = {}
+
+    if os.path.exists(ATT_FILE):
+
+        with open(ATT_FILE) as f:
+
+            reader = csv.reader(f)
+
+            for row in reader:
+
+                if len(row) >= 3:
+
+                    name = row[0]
+                    date = row[1]
+                    status = row[2]
+
+                    records[date] = status
+
+    calendar_html = ""
+
+    for date, status in records.items():
+
+        color = "green" if status == "Present" else "red"
+
+        calendar_html += f"""
+
+        <div class='day {color}'>
+
+        <p>{date}</p>
+
+        <b>{status}</b>
+
+        </div>
+        """
+
+    return f"""
+    {STYLE}
+
+    <div class='container'>
+
+    <h1>📅 Attendance Calendar</h1>
+
+    <div class='calendar'>
+
+    {calendar_html}
+
+    </div>
+
+    <br>
+
+    <a href='/'><button>🏠 Home</button></a>
+
+    </div>
+    """
 
 # -------------------- ADMIN --------------------
 
@@ -477,15 +639,16 @@ def admin():
                     <td>{row[2]}</td>
 
                     </tr>
-
                     """
 
     return f"""
     {STYLE}
 
-    <h1>⚙️ Admin Panel</h1>
+    <div class='container'>
 
-    <table border='1' cellpadding='10'>
+    <h1>⚙ Admin Dashboard</h1>
+
+    <table>
 
     <tr>
 
@@ -508,6 +671,8 @@ def admin():
     <a href='/delete'><button>🗑 Delete Data</button></a>
 
     <a href='/'><button>🏠 Home</button></a>
+
+    </div>
     """
 
 # -------------------- DOWNLOAD --------------------
@@ -529,7 +694,6 @@ def delete():
     try:
 
         if os.path.exists(ATT_FILE):
-
             os.remove(ATT_FILE)
 
         for root, dirs, files in os.walk(DATA_DIR):
@@ -566,8 +730,6 @@ def delete():
 
         <p>{str(e)}</p>
 
-        <a href='/admin'><button>Back</button></a>
-
         </div>
         """
 
@@ -575,4 +737,4 @@ def delete():
 
 if __name__ == "__main__":
 
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
