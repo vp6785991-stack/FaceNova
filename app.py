@@ -500,13 +500,13 @@ def img(user, file):
 @app.route("/graph")
 def graph():
 
-    try:
+    attendance = {}
 
-        attendance = {}
+    try:
 
         if os.path.exists(ATT_FILE):
 
-            with open(ATT_FILE) as f:
+            with open(ATT_FILE, "r") as f:
 
                 reader = csv.reader(f)
 
@@ -514,34 +514,41 @@ def graph():
 
                     if len(row) >= 3:
 
-                        attendance[row[0]] = attendance.get(row[0], 0) + 1
+                        name = row[0]
 
-        if len(attendance) == 0:
+                        attendance[name] = attendance.get(name, 0) + 1
+
+        if not attendance:
 
             return f"""
             {STYLE}
             <div class='container'>
-            <h2>No attendance data found</h2>
-            <a href='/'>Home</a>
+            <h2>No Attendance Data Found</h2>
+            <a href='/'><button>🏠 Home</button></a>
             </div>
             """
 
-        plt.figure(figsize=(7,5))
+        plt.close("all")
+
+        plt.figure(figsize=(8,5))
 
         plt.bar(
             list(attendance.keys()),
             list(attendance.values())
         )
 
-        plt.xlabel("Users")
-        plt.ylabel("Attendance")
         plt.title("FaceNova Analytics")
+        plt.xlabel("Students")
+        plt.ylabel("Attendance")
 
-        graph_path = os.path.join(GRAPH_DIR, "graph.png")
+        graph_path = os.path.join(
+            GRAPH_DIR,
+            "graph.png"
+        )
 
         plt.savefig(graph_path)
 
-        plt.close()
+        plt.close("all")
 
         return f"""
         {STYLE}
@@ -559,14 +566,21 @@ def graph():
         <h2>Graph Error</h2>
         <pre>{str(e)}</pre>
         """
-        
-        @app.route("/graph-image")
+
+
+# -------------------- GRAPH IMAGE --------------------
+
+@app.route("/graph-image")
 def graph_image():
 
-    graph_path = os.path.join(GRAPH_DIR, "graph.png")
+    graph_path = os.path.join(
+        GRAPH_DIR,
+        "graph.png"
+    )
 
     if not os.path.exists(graph_path):
-        return "Graph not generated yet"
+
+        return "Graph not generated"
 
     return send_file(graph_path)
 
