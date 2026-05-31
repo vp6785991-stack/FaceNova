@@ -500,56 +500,65 @@ def img(user, file):
 @app.route("/graph")
 def graph():
 
-    attendance = {}
+    try:
 
-    if os.path.exists(ATT_FILE):
+        attendance = {}
 
-        with open(ATT_FILE) as f:
+        if os.path.exists(ATT_FILE):
 
-            reader = csv.reader(f)
+            with open(ATT_FILE) as f:
 
-            for row in reader:
+                reader = csv.reader(f)
 
-                if len(row) >= 3:
+                for row in reader:
 
-                    attendance[row[0]] = attendance.get(row[0], 0) + 1
+                    if len(row) >= 3:
 
-    plt.figure(figsize=(7,5))
+                        attendance[row[0]] = attendance.get(row[0], 0) + 1
 
-    plt.bar(attendance.keys(), attendance.values())
+        if len(attendance) == 0:
 
-    plt.xlabel("Users")
+            return f"""
+            {STYLE}
+            <div class='container'>
+            <h2>No attendance data found</h2>
+            <a href='/'>Home</a>
+            </div>
+            """
 
-    plt.ylabel("Attendance")
+        plt.figure(figsize=(7,5))
 
-    plt.title("FaceNova Analytics")
+        plt.bar(
+            list(attendance.keys()),
+            list(attendance.values())
+        )
 
-    graph_path = os.path.join(GRAPH_DIR, "graph.png")
+        plt.xlabel("Users")
+        plt.ylabel("Attendance")
+        plt.title("FaceNova Analytics")
 
-    plt.savefig(graph_path)
+        graph_path = os.path.join(GRAPH_DIR, "graph.png")
 
-    return f"""
-    {STYLE}
+        plt.savefig(graph_path)
 
-    <div class='container'>
+        plt.close()
 
-    <h1>📊 Attendance Graph</h1>
+        return f"""
+        {STYLE}
+        <div class='container'>
+        <h1>📊 Attendance Graph</h1>
+        <img src='/graph-image' width='100%'>
+        <br><br>
+        <a href='/'><button>🏠 Home</button></a>
+        </div>
+        """
 
-    <img src='/graph-image' width='100%'>
+    except Exception as e:
 
-    <br>
-
-    <a href='/'><button>🏠 Home</button></a>
-
-    </div>
-    """
-
-# -------------------- GRAPH IMAGE --------------------
-
-@app.route("/graph-image")
-def graph_image():
-
-    return send_file(os.path.join(GRAPH_DIR, "graph.png"))
+        return f"""
+        <h2>Graph Error</h2>
+        <pre>{str(e)}</pre>
+        """
 
 # -------------------- CALENDAR --------------------
 
