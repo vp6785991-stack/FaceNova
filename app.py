@@ -559,6 +559,16 @@ def graph():
         <h2>Graph Error</h2>
         <pre>{str(e)}</pre>
         """
+        
+        @app.route("/graph-image")
+def graph_image():
+
+    graph_path = os.path.join(GRAPH_DIR, "graph.png")
+
+    if not os.path.exists(graph_path):
+        return "Graph not generated yet"
+
+    return send_file(graph_path)
 
 # -------------------- CALENDAR --------------------
 
