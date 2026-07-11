@@ -1,3 +1,4 @@
+
 from flask import Flask, request, send_file, redirect, url_for
 import os, csv, base64, json, calendar as cal_mod
 from datetime import datetime, timedelta
@@ -1173,77 +1174,647 @@ def gallery():
     return layout("Gallery", content, "gallery")
 
 # ══════════════════════════════════════════════════════
-#  ANALYTICS
+#  ANALYTICS ENGINE
 # ══════════════════════════════════════════════════════
+
+CHART_BG   = "#07090f"
+CARD_BG    = "#0d1117"
+PANEL_BG   = "#111827"
+GRID_COL   = "#1a2234"
+TEXT_COL   = "#f1f5f9"
+MUTED_COL  = "#475569"
+GREEN_COL  = "#10b981"
+GREEN2_COL = "#34d399"
+RED_COL    = "#ef4444"
+RED2_COL   = "#f87171"
+BLUE_COL   = "#3b82f6"
+CYAN_COL   = "#06b6d4"
+AMBER_COL  = "#f59e0b"
+PURPLE_COL = "#8b5cf6"
+
+plt.rcParams.update({
+    "font.family":      "DejaVu Sans",
+    "axes.labelcolor":  MUTED_COL,
+    "xtick.color":      MUTED_COL,
+    "ytick.color":      MUTED_COL,
+    "figure.facecolor": CHART_BG,
+    "axes.facecolor":   CARD_BG,
+})
+
+def style_ax(ax, xgrid=False):
+    ax.set_facecolor(PANEL_BG)
+    ax.tick_params(colors=MUTED_COL, labelsize=9, length=3)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.yaxis.grid(True, color=GRID_COL, linewidth=0.7, linestyle="--", zorder=0)
+    ax.xaxis.grid(xgrid, color=GRID_COL, linewidth=0.5, linestyle="--", zorder=0)
+    ax.set_axisbelow(True)
+
+def save_graph(fig, name):
+    fig.patch.set_facecolor(CHART_BG)
+    path = os.path.join(GRAPH_DIR, name)
+    plt.savefig(path, dpi=130, bbox_inches="tight",
+                facecolor=CHART_BG, edgecolor="none")
+    plt.close("all")
+    return path
+
+# ── DATA AGGREGATORS ─────────────────────────────────
+
+def get_daily_counts(records, days=30):
+    result = []
+    for i in range(days-1, -1, -1):
+        d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        p = sum(1 for r in records if r["date"]==d and r["status"]=="Present")
+        a = sum(1 for r in records if r["date"]==d and r["status"]!="Present")
+        result.append((d, p, a))
+    return result
+
+def get_weekly_counts(records, weeks=8):
+    result = []
+    today = datetime.now().date()
+    for i in range(weeks-1, -1, -1):
+        ws  = today - timedelta(days=today.weekday() + 7*i)
+        we  = ws + timedelta(days=6)
+        lbl = ws.strftime("%d %b")
+        p = sum(1 for r in records if ws.strftime("%Y-%m-%d") <= r["date"] <= we.strftime("%Y-%m-%d") and r["status"]=="Present")
+        a = sum(1 for r in records if ws.strftime("%Y-%m-%d") <= r["date"] <= we.strftime("%Y-%m-%d") and r["status"]!="Present")
+        result.append((lbl, p, a))
+    return result
+
+def get_monthly_counts(records, months=6):
+    result = []
+    now = datetime.now()
+    for i in range(months-1, -1, -1):
+        m = now.month - i; y = now.year
+        while m <= 0: m += 12; y -= 1
+        lbl    = datetime(y, m, 1).strftime("%b %Y")
+        prefix = f"{y:04d}-{m:02d}-"
+        p = sum(1 for r in records if r["date"].startswith(prefix) and r["status"]=="Present")
+        a = sum(1 for r in records if r["date"].startswith(prefix) and r["status"]!="Present")
+        result.append((lbl, p, a))
+    return result
+
+# ── CHART 1 · DUAL LINE (30-day trend) ───────────────
+
+def render_line(records):
+    data   = get_daily_counts(records, 30)
+    labels = [d[0][-5:] for d in data]
+    p_vals = np.array([d[1] for d in data], dtype=float)
+    a_vals = np.array([d[2] for d in data], dtype=float)
+    x      = np.arange(30)
+
+    # smooth with rolling average
+    def smooth(arr, w=3):
+        return np.convolve(arr, np.ones(w)/w, mode="same")
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    style_ax(ax)
+
+    # shaded fill first
+    ax.fill_between(x, smooth(p_vals), alpha=0.15, color=GREEN_COL, zorder=1)
+    ax.fill_between(x, smooth(a_vals), alpha=0.12, color=RED_COL,   zorder=1)
+
+    # raw dots (faint)
+    ax.scatter(x, p_vals, s=18, color=GREEN_COL, alpha=0.4, zorder=2)
+    ax.scatter(x, a_vals, s=18, color=RED_COL,   alpha=0.4, zorder=2)
+
+    # smooth lines (bold)
+    ax.plot(x, smooth(p_vals), color=GREEN_COL, linewidth=2.8, zorder=3, label="Present")
+    ax.plot(x, smooth(a_vals), color=RED_COL,   linewidth=2.8, zorder=3, label="Absent")
+
+    # target line
+    max_p = int(p_vals.max()) if p_vals.max() > 0 else 1
+    ax.axhline(max_p * 0.75, color=AMBER_COL, linewidth=1, linestyle=":", alpha=0.7, label="75% Target")
+
+    ax.set_xticks(list(x)[::3])
+    ax.set_xticklabels(labels[::3], rotation=30, ha="right", fontsize=8.5)
+    ax.set_title("Daily Attendance Trend  ·  Last 30 Days",
+                 color=TEXT_COL, fontsize=14, fontweight="bold", pad=16, loc="left")
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95,
+              fontsize=10, edgecolor=GRID_COL)
+
+    # annotate peak
+    peak_day = int(np.argmax(p_vals))
+    if p_vals[peak_day] > 0:
+        ax.annotate(f"Peak\n{int(p_vals[peak_day])}",
+                    xy=(peak_day, p_vals[peak_day]),
+                    xytext=(peak_day+1, p_vals[peak_day]+0.6),
+                    color=GREEN2_COL, fontsize=8, fontweight="bold",
+                    arrowprops=dict(arrowstyle="->", color=GREEN2_COL, lw=1.2))
+    return save_graph(fig, "graph_line.png")
+
+# ── CHART 2 · CANDLESTICK (weekly) ───────────────────
+
+def render_candle(records):
+    """
+    Real-style candlestick: each candle = one week.
+    Open  = Mon attendance count
+    Close = Fri attendance count
+    High  = best single day in week
+    Low   = worst single day in week
+    Green candle = Close >= Open (improving week)
+    Red candle   = Close <  Open (declining week)
+    """
+    N     = 12
+    today = datetime.now().date()
+    candles = []
+    for i in range(N-1, -1, -1):
+        ws   = today - timedelta(days=today.weekday() + 7*i)
+        days = []
+        for d in range(7):
+            day = ws + timedelta(days=d)
+            ds  = day.strftime("%Y-%m-%d")
+            p   = sum(1 for r in records if r["date"]==ds and r["status"]=="Present")
+            days.append(p)
+        open_  = float(days[0])          # Mon
+        close_ = float(days[4])          # Fri
+        high_  = float(max(days))
+        low_   = float(min(days))
+        label  = ws.strftime("%d %b")
+        candles.append((label, open_, close_, high_, low_))
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    style_ax(ax)
+
+    for i, (lbl, op, cl, hi, lo) in enumerate(candles):
+        bullish    = cl >= op
+        body_col   = GREEN_COL if bullish else RED_COL
+        wick_col   = GREEN2_COL if bullish else RED2_COL
+        body_bot   = min(op, cl)
+        body_h     = max(abs(cl - op), 0.15)
+
+        # Upper wick
+        ax.plot([i, i], [max(op, cl), hi], color=wick_col, linewidth=1.6, zorder=2, solid_capstyle="round")
+        # Lower wick
+        ax.plot([i, i], [lo, body_bot],    color=wick_col, linewidth=1.6, zorder=2, solid_capstyle="round")
+
+        # Body rectangle with glow border
+        body = plt.Rectangle((i-0.32, body_bot), 0.64, body_h,
+                              facecolor=body_col, alpha=0.85, zorder=3,
+                              linewidth=1.2, edgecolor=wick_col)
+        ax.add_patch(body)
+
+        # Open / close dots
+        ax.scatter([i], [op], color=MUTED_COL, s=22, zorder=4)
+        ax.scatter([i], [cl], color=TEXT_COL,  s=22, zorder=4)
+
+        # Close label
+        ax.text(i, hi + 0.18, f"{int(cl)}", ha="center", va="bottom",
+                color=wick_col, fontsize=7.5, fontweight="bold")
+
+    ax.set_xlim(-0.7, N - 0.3)
+    ax.set_xticks(range(N))
+    ax.set_xticklabels([c[0] for c in candles], rotation=30, ha="right", fontsize=8.5)
+    ax.set_ylabel("Students Present", color=MUTED_COL, fontsize=9)
+    ax.set_title("Weekly Attendance Candlestick  ·  Mon Open / Fri Close",
+                 color=TEXT_COL, fontsize=14, fontweight="bold", pad=16, loc="left")
+
+    bull = plt.Rectangle((0,0),1,1, facecolor=GREEN_COL, alpha=0.85, edgecolor=GREEN2_COL)
+    bear = plt.Rectangle((0,0),1,1, facecolor=RED_COL,   alpha=0.85, edgecolor=RED2_COL)
+    ax.legend([bull, bear], ["📈 Bull Week (Fri ≥ Mon)", "📉 Bear Week (Fri < Mon)"],
+              facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95,
+              fontsize=10, edgecolor=GRID_COL)
+
+    # Volume-style bar strip at bottom
+    ax2 = ax.twinx()
+    ax2.set_facecolor("none")
+    totals = [(c[2]+c[1]) for c in candles]
+    ax2.bar(range(N), totals, width=0.64, color=BLUE_COL, alpha=0.08, zorder=0)
+    ax2.set_ylim(0, max(totals)*8 if totals else 1)
+    ax2.tick_params(left=False, right=False, labelleft=False, labelright=False)
+    for sp in ax2.spines.values(): sp.set_visible(False)
+
+    return save_graph(fig, "graph_candle.png")
+
+# ── CHART 3 · STUDENT BAR ────────────────────────────
+
+def render_bar(records):
+    att = {}
+    for r in records:
+        n = r["name"]
+        if n not in att: att[n] = {"p":0,"a":0}
+        if r["status"]=="Present": att[n]["p"] += 1
+        else:                       att[n]["a"] += 1
+
+    names  = list(att.keys())
+    p_vals = [att[n]["p"] for n in names]
+    a_vals = [att[n]["a"] for n in names]
+    pcts   = [round(p/(p+a)*100) if (p+a) else 0 for p,a in zip(p_vals, a_vals)]
+    x, w   = np.arange(len(names)), 0.34
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), gridspec_kw={"width_ratios":[2,1]})
+    style_ax(axes[0]); style_ax(axes[1])
+
+    # Grouped bars with gradient effect
+    bar_colors_p = [GREEN_COL if pct>=75 else (AMBER_COL if pct>=50 else RED_COL) for pct in pcts]
+    bars_p = axes[0].bar(x - w/2, p_vals, w, label="Present", color=bar_colors_p, alpha=0.88, zorder=3)
+    bars_a = axes[0].bar(x + w/2, a_vals, w, label="Absent",  color=RED2_COL,    alpha=0.55, zorder=3)
+
+    for bar, val in zip(bars_p, p_vals):
+        if val: axes[0].text(bar.get_x()+bar.get_width()/2, val+0.08,
+                             str(val), ha="center", color=TEXT_COL, fontsize=8, fontweight="bold")
+    for bar, val in zip(bars_a, a_vals):
+        if val: axes[0].text(bar.get_x()+bar.get_width()/2, val+0.08,
+                             str(val), ha="center", color=MUTED_COL, fontsize=8)
+
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(names, rotation=22, ha="right", fontsize=9)
+    axes[0].set_title("Attendance by Student", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    axes[0].legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95, edgecolor=GRID_COL)
+
+    # Horizontal rate bars (right panel)
+    sorted_idx = np.argsort(pcts)
+    s_names = [names[i] for i in sorted_idx]
+    s_pcts  = [pcts[i]  for i in sorted_idx]
+    s_colors = [GREEN_COL if p>=75 else (AMBER_COL if p>=50 else RED_COL) for p in s_pcts]
+    y_pos = np.arange(len(s_names))
+    axes[1].barh(y_pos, s_pcts, color=s_colors, alpha=0.85, height=0.55, zorder=3)
+    axes[1].set_yticks(y_pos)
+    axes[1].set_yticklabels(s_names, fontsize=9)
+    axes[1].set_xlim(0, 110)
+    axes[1].axvline(75, color=AMBER_COL, linewidth=1.2, linestyle="--", alpha=0.8)
+    axes[1].set_title("Attendance Rate %", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    for i, pct in enumerate(s_pcts):
+        axes[1].text(pct+1.5, i, f"{pct}%", va="center", color=TEXT_COL, fontsize=8.5, fontweight="bold")
+
+    return save_graph(fig, "graph_bar.png")
+
+# ── CHART 4 · WEEKLY STACKED + RATE ─────────────────
+
+def render_weekly(records):
+    data   = get_weekly_counts(records, 8)
+    labels = [d[0] for d in data]
+    p_vals = np.array([d[1] for d in data], dtype=float)
+    a_vals = np.array([d[2] for d in data], dtype=float)
+    rates  = np.array([round(p/(p+a)*100) if (p+a) else 0 for p, a in zip(p_vals, a_vals)], dtype=float)
+    x      = np.arange(8)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    style_ax(axes[0]); style_ax(axes[1])
+
+    # Stacked bar with value labels
+    bars_p = axes[0].bar(x, p_vals, 0.55, label="Present", color=GREEN_COL, alpha=0.88, zorder=3)
+    bars_a = axes[0].bar(x, a_vals, 0.55, bottom=p_vals, label="Absent",   color=RED_COL, alpha=0.7, zorder=3)
+    for i, (p, a) in enumerate(zip(p_vals, a_vals)):
+        total = p + a
+        if total: axes[0].text(i, total+0.1, str(int(total)),
+                               ha="center", color=TEXT_COL, fontsize=8, fontweight="bold")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(labels, rotation=30, ha="right", fontsize=8.5)
+    axes[0].set_title("Weekly Stacked Attendance", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    axes[0].legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95, edgecolor=GRID_COL)
+
+    # Rate line with area + diamond markers
+    axes[1].fill_between(x, rates, alpha=0.14, color=BLUE_COL, zorder=1)
+    axes[1].plot(x, rates, color=BLUE_COL, linewidth=2.8, zorder=3, marker="D",
+                 markersize=7, markerfacecolor=CYAN_COL, markeredgecolor=BLUE_COL, markeredgewidth=1.5)
+    axes[1].axhline(75, color=AMBER_COL, linewidth=1.3, linestyle="--", alpha=0.85, label="75% Target", zorder=2)
+    axes[1].set_ylim(0, 115)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=30, ha="right", fontsize=8.5)
+    for i, r in enumerate(rates):
+        axes[1].text(i, r + (4 if r < 105 else -8), f"{int(r)}%",
+                     ha="center", color=CYAN_COL, fontsize=8.5, fontweight="bold")
+    axes[1].set_title("Weekly Attendance Rate %", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    axes[1].legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95, edgecolor=GRID_COL)
+
+    return save_graph(fig, "graph_weekly.png")
+
+# ── CHART 5 · MONTHLY OVERVIEW ───────────────────────
+
+def render_monthly(records):
+    data   = get_monthly_counts(records, 6)
+    labels = [d[0] for d in data]
+    p_vals = [d[1] for d in data]
+    a_vals = [d[2] for d in data]
+    rates  = [round(p/(p+a)*100) if (p+a) else 0 for p, a in zip(p_vals, a_vals)]
+    x      = np.arange(6)
+
+    fig = plt.figure(figsize=(14, 10))
+    gs  = fig.add_gridspec(2, 3, hspace=0.45, wspace=0.35)
+    ax1 = fig.add_subplot(gs[0, :2])  # top-left wide: grouped bar
+    ax2 = fig.add_subplot(gs[0, 2])   # top-right: donut
+    ax3 = fig.add_subplot(gs[1, :])   # bottom full: rate area line
+
+    for ax in [ax1, ax2, ax3]: style_ax(ax)
+
+    # Grouped bar
+    w = 0.30
+    ax1.bar(x - w/2, p_vals, w, label="Present", color=GREEN_COL, alpha=0.88, zorder=3)
+    ax1.bar(x + w/2, a_vals, w, label="Absent",  color=RED_COL,   alpha=0.82, zorder=3)
+    for i, (p, a) in enumerate(zip(p_vals, a_vals)):
+        if p: ax1.text(i-w/2, p+0.06, str(p), ha="center", color=GREEN2_COL, fontsize=8, fontweight="bold")
+        if a: ax1.text(i+w/2, a+0.06, str(a), ha="center", color=RED2_COL,   fontsize=8, fontweight="bold")
+    ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
+    ax1.set_title("Monthly Present vs Absent", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    ax1.legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95, edgecolor=GRID_COL)
+
+    # Donut — current month
+    ax2.set_facecolor(PANEL_BG)
+    lp, la = p_vals[-1], a_vals[-1]
+    if lp + la > 0:
+        wedge_props = dict(width=0.52, edgecolor=CHART_BG, linewidth=2.5)
+        ax2.pie([lp, la], colors=[GREEN_COL, RED_COL], startangle=90,
+                wedgeprops=wedge_props, counterclock=False)
+        pct = round(lp/(lp+la)*100)
+        col = GREEN_COL if pct>=75 else (AMBER_COL if pct>=50 else RED_COL)
+        ax2.text(0,  0.12,  f"{pct}%",      ha="center", va="center",
+                 color=col, fontsize=26, fontweight="bold")
+        ax2.text(0, -0.18, "This Month",    ha="center", va="center",
+                 color=MUTED_COL, fontsize=9)
+        ax2.text(0, -0.38, f"✅{lp}  ❌{la}", ha="center", va="center",
+                 color=MUTED_COL, fontsize=8)
+    ax2.set_title(labels[-1] if labels else "", color=TEXT_COL, fontsize=12, fontweight="bold", pad=10)
+
+    # 6-month rate area
+    x6 = np.arange(6)
+    ax3.fill_between(x6, rates, alpha=0.16, color=PURPLE_COL, zorder=1)
+    ax3.plot(x6, rates, color=PURPLE_COL, linewidth=3, zorder=3,
+             marker="o", markersize=8, markerfacecolor=BLUE_COL,
+             markeredgecolor=PURPLE_COL, markeredgewidth=2)
+    ax3.axhline(75, color=AMBER_COL, linewidth=1.2, linestyle="--", alpha=0.8, label="75% Goal")
+    ax3.set_ylim(0, 115)
+    ax3.set_xticks(x6); ax3.set_xticklabels(labels, fontsize=9)
+    for i, r in enumerate(rates):
+        col = GREEN_COL if r>=75 else (AMBER_COL if r>=50 else RED_COL)
+        ax3.text(i, r+3.5, f"{r}%", ha="center", color=col, fontsize=9, fontweight="bold")
+    ax3.set_title("6-Month Attendance Rate Trend", color=TEXT_COL, fontsize=13, fontweight="bold", pad=12, loc="left")
+    ax3.legend(facecolor=PANEL_BG, labelcolor=TEXT_COL, framealpha=0.95, edgecolor=GRID_COL)
+
+    return save_graph(fig, "graph_monthly.png")
+
+# ── CHART 6 · 30-DAY HEATMAP ────────────────────────
+
+def render_heatmap(records):
+    """
+    GitHub-style contribution heatmap — 7 rows (days of week) × 5 cols (weeks).
+    Color intensity = number of students present that day.
+    """
+    today = datetime.now().date()
+    days  = 35  # 5 weeks
+    matrix = np.zeros((7, 5))   # rows=weekday, cols=week
+    col_labels = []
+
+    for col in range(4, -1, -1):
+        week_start = today - timedelta(days=today.weekday() + 7*col)
+        col_labels.append(week_start.strftime("%d %b"))
+        for row in range(7):
+            day = week_start + timedelta(days=row)
+            ds  = day.strftime("%Y-%m-%d")
+            p   = sum(1 for r in records if r["date"]==ds and r["status"]=="Present")
+            matrix[row, 4-col] = p
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.set_facecolor(PANEL_BG)
+
+    # custom green colormap
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list(
+        "fn_green", [PANEL_BG, "#134e2a", GREEN_COL, GREEN2_COL], N=256)
+
+    im = ax.imshow(matrix, cmap=cmap, aspect="auto",
+                   vmin=0, vmax=max(matrix.max(), 1))
+
+    # cell value labels
+    for r in range(7):
+        for c in range(5):
+            val = int(matrix[r, c])
+            txt_col = TEXT_COL if val > 0 else GRID_COL
+            ax.text(c, r, str(val) if val > 0 else "·",
+                    ha="center", va="center", fontsize=10,
+                    fontweight="bold", color=txt_col)
+
+    dow = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    ax.set_yticks(range(7)); ax.set_yticklabels(dow, fontsize=9, color=MUTED_COL)
+    ax.set_xticks(range(5)); ax.set_xticklabels(col_labels, fontsize=9, color=MUTED_COL)
+    for sp in ax.spines.values(): sp.set_visible(False)
+    ax.tick_params(length=0)
+
+    cbar = plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+    cbar.ax.tick_params(colors=MUTED_COL, labelsize=8)
+    cbar.outline.set_visible(False)
+    cbar.set_label("Students Present", color=MUTED_COL, fontsize=9)
+
+    ax.set_title("5-Week Attendance Heatmap  ·  Darker = More Students",
+                 color=TEXT_COL, fontsize=13, fontweight="bold", pad=14, loc="left")
+    fig.patch.set_facecolor(CHART_BG)
+    return save_graph(fig, "graph_heatmap.png")
+
+# ── MAIN ANALYTICS ROUTE ─────────────────────────────
 
 @app.route("/graph")
 def graph():
-    records = read_all_records()
+    records    = read_all_records()
+    chart_type = request.args.get("type", "line")
+
     if not records:
-        content = '<div class="card" style="text-align:center;padding:60px"><div style="font-size:50px;margin-bottom:14px">📊</div><div class="sec-title">No Data Yet</div><div style="color:var(--muted);margin-top:8px">Start scanning to build analytics.</div></div>'
+        content = """
+        <div class="card" style="text-align:center;padding:70px">
+          <div style="font-size:56px;margin-bottom:16px">📊</div>
+          <div class="sec-title" style="font-size:20px">No Data Yet</div>
+          <div style="color:var(--muted);margin-top:8px;margin-bottom:22px">
+            Start scanning faces to build your analytics dashboard.
+          </div>
+          <a href="/scan" class="btn btn-primary">🎥 Start Scanning</a>
+        </div>"""
         return layout("Analytics", content, "analytics")
 
-    # ── Bar: per-person attendance
-    att_map = {}
-    for r in records:
-        att_map[r["name"]] = att_map.get(r["name"], {"p":0,"a":0})
-        if r["status"]=="Present": att_map[r["name"]]["p"] += 1
-        else:                       att_map[r["name"]]["a"] += 1
+    ts = str(datetime.now().timestamp())
 
-    names = list(att_map.keys())
-    p_vals = [att_map[n]["p"] for n in names]
-    a_vals = [att_map[n]["a"] for n in names]
-    x = np.arange(len(names))
-    w = 0.38
+    CHART_META = {
+        "line":    ("render_line",    "graph_line.png",    "📉 Line Chart",        "30-day daily present/absent trend with smoothing"),
+        "candle":  ("render_candle",  "graph_candle.png",  "🕯 Candlestick Chart", "Weekly open/close/high/low · green = improving week"),
+        "bar":     ("render_bar",     "graph_bar.png",     "📊 Student Bar Chart", "Per-student present vs absent + attendance rate ranking"),
+        "weekly":  ("render_weekly",  "graph_weekly.png",  "📅 Weekly Overview",   "8-week stacked attendance + rate trend line"),
+        "monthly": ("render_monthly", "graph_monthly.png", "🗓 Monthly Dashboard", "6-month grouped bar, donut gauge + trend line"),
+        "heatmap": ("render_heatmap", "graph_heatmap.png", "🔥 Heatmap",           "GitHub-style 5-week attendance intensity grid"),
+    }
 
-    plt.close("all")
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.patch.set_facecolor("#111827")
-    for ax in axes:
-        ax.set_facecolor("#111827")
-        ax.tick_params(colors="#94a3b8")
-        ax.spines[:].set_visible(False)
-        ax.yaxis.grid(True, color="rgba(255,255,255,0.06)", zorder=0)
-        ax.set_axisbelow(True)
+    if chart_type not in CHART_META:
+        chart_type = "line"
 
-    # bar chart
-    bars_p = axes[0].bar(x-w/2, p_vals, w, label="Present", color="#10b981", zorder=3)
-    bars_a = axes[0].bar(x+w/2, a_vals, w, label="Absent",  color="#ef4444", zorder=3)
-    axes[0].set_xticks(x); axes[0].set_xticklabels(names, rotation=20, ha="right")
-    axes[0].set_title("Attendance by Student", color="#f1f5f9", fontsize=13, fontweight="bold", pad=12)
-    axes[0].legend(facecolor="#1e293b", labelcolor="#f1f5f9", framealpha=0.8)
+    fn_name, img_file, chart_title, chart_sub = CHART_META[chart_type]
+    RENDERERS = {
+        "line":    render_line,
+        "candle":  render_candle,
+        "bar":     render_bar,
+        "weekly":  render_weekly,
+        "monthly": render_monthly,
+        "heatmap": render_heatmap,
+    }
+    RENDERERS[chart_type](records)
 
-    # line chart: daily totals last 14 days
-    dates_14 = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(13,-1,-1)]
-    day_counts = []
-    for d in dates_14:
-        p = sum(1 for r in records if r["date"]==d and r["status"]=="Present")
-        day_counts.append(p)
-    axes[1].plot(range(14), day_counts, color="#3b82f6", linewidth=2.5, marker="o", markersize=5, zorder=3)
-    axes[1].fill_between(range(14), day_counts, alpha=0.15, color="#3b82f6")
-    axes[1].set_xticks(range(14))
-    axes[1].set_xticklabels([d[-5:] for d in dates_14], rotation=30, ha="right", fontsize=8)
-    axes[1].set_title("Daily Present Count (Last 14 Days)", color="#f1f5f9", fontsize=13, fontweight="bold", pad=12)
+    img_url = f"/graph-image/{img_file}?t={ts}"
 
-    plt.tight_layout(pad=2)
-    graph_path = os.path.join(GRAPH_DIR, "graph.png")
-    plt.savefig(graph_path, dpi=110)
-    plt.close("all")
+    # ── KPI summary row
+    all_p     = sum(1 for r in records if r["status"]=="Present")
+    all_a     = len(records) - all_p
+    all_total = len(records)
+    all_pct   = round(all_p/all_total*100) if all_total else 0
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_p   = sum(1 for r in records if r["date"]==today_str and r["status"]=="Present")
+    students  = enrolled_students()
+
+    pbar_cls = "pbar-green" if all_pct>=75 else ("pbar-amber" if all_pct>=50 else "pbar-red")
+
+    kpi_html = f"""
+    <div class="stats-row" style="margin-bottom:22px">
+      <div class="stat s-blue">
+        <div class="stat-ico" style="background:rgba(59,130,246,0.15)">👥</div>
+        <div class="stat-val">{len(students)}</div>
+        <div class="stat-lbl">Enrolled</div>
+      </div>
+      <div class="stat s-green">
+        <div class="stat-ico" style="background:rgba(16,185,129,0.15)">✅</div>
+        <div class="stat-val">{all_p}</div>
+        <div class="stat-lbl">Total Present</div>
+      </div>
+      <div class="stat s-red">
+        <div class="stat-ico" style="background:rgba(239,68,68,0.15)">❌</div>
+        <div class="stat-val">{all_a}</div>
+        <div class="stat-lbl">Total Absent</div>
+      </div>
+      <div class="stat s-amber">
+        <div class="stat-ico" style="background:rgba(245,158,11,0.15)">📊</div>
+        <div class="stat-val">{all_pct}%</div>
+        <div class="stat-lbl">Overall Rate</div>
+      </div>
+    </div>
+    <div class="card" style="padding:16px 20px;margin-bottom:22px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:12.5px;font-weight:700;color:var(--muted)">OVERALL ATTENDANCE RATE</span>
+        <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:17px">{all_pct}%  ·  {all_p} of {all_total} records</span>
+      </div>
+      <div class="pbar-wrap"><div class="pbar {pbar_cls}" style="width:{all_pct}%"></div></div>
+    </div>"""
+
+    # ── Chart type tab bar
+    TABS = [
+        ("line",    "📉", "Line",    "30-day trend"),
+        ("candle",  "🕯", "Candle",  "Weekly OHLC"),
+        ("bar",     "📊", "Bar",     "Per student"),
+        ("weekly",  "📅", "Weekly",  "8-week view"),
+        ("monthly", "🗓", "Monthly", "6-month view"),
+        ("heatmap", "🔥", "Heatmap", "5-week grid"),
+    ]
+    tab_btns = ""
+    for t, emoji, lbl, hint in TABS:
+        if t == chart_type:
+            style = ("background:linear-gradient(135deg,var(--blue),#2563eb);color:white;"
+                     "border-color:transparent;box-shadow:0 4px 14px rgba(59,130,246,0.35);")
+        else:
+            style = ""
+        tab_btns += f"""
+        <a href="/graph?type={t}" class="btn btn-ghost"
+           style="flex-direction:column;gap:2px;padding:10px 16px;{style}font-size:13px"
+           title="{hint}">
+          <span style="font-size:17px">{emoji}</span>
+          <span style="font-size:11px;font-weight:700">{lbl}</span>
+        </a>"""
+
+    # ── Monthly mini-cards
+    monthly  = get_monthly_counts(records, 6)
+    m_cards  = ""
+    for lbl, p, a in monthly:
+        total = p + a
+        pct   = round(p/total*100) if total else 0
+        pbar  = "pbar-green" if pct>=75 else ("pbar-amber" if pct>=50 else "pbar-red")
+        m_cards += f"""
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:0.8px;margin-bottom:6px">{lbl.upper()}</div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;margin-bottom:2px">{pct}%</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:7px">✅{p} &nbsp;❌{a}</div>
+          <div class="pbar-wrap"><div class="pbar {pbar}" style="width:{pct}%"></div></div>
+        </div>"""
+
+    # ── Weekly table
+    weekly_data = get_weekly_counts(records, 6)
+    w_rows = ""
+    for lbl, p, a in weekly_data:
+        total = p + a
+        pct   = round(p/total*100) if total else 0
+        pill  = "pill-green" if pct>=75 else ("pill-amber" if pct>=50 else "pill-red")
+        trend = "↑" if pct>=75 else ("→" if pct>=50 else "↓")
+        trend_col = "var(--green)" if pct>=75 else ("var(--amber)" if pct>=50 else "var(--red)")
+        w_rows += f"""<tr>
+          <td><strong>{lbl}</strong></td>
+          <td style="color:var(--green);font-weight:600">{p}</td>
+          <td style="color:var(--red);font-weight:600">{a}</td>
+          <td>{total}</td>
+          <td><span class="pill {pill}">{pct}%</span></td>
+          <td style="color:{trend_col};font-size:16px;font-weight:700">{trend}</td>
+        </tr>"""
 
     content = f"""
-    <div class="sec-head" style="margin-bottom:20px">
-      <div><div class="sec-title" style="font-size:20px">📊 Attendance Analytics</div>
-      <div class="sec-sub">Per-student breakdown and 14-day trend</div></div>
-      <a href="/download" class="btn btn-ghost">⬇ Export CSV</a>
+    <div class="sec-head" style="margin-bottom:6px">
+      <div>
+        <div class="sec-title" style="font-size:20px">📊 Advanced Analytics</div>
+        <div class="sec-sub">Professional attendance intelligence — 6 chart types</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <a href="/download" class="btn btn-ghost">⬇ Export CSV</a>
+      </div>
     </div>
+
+    {kpi_html}
+
+    <!-- Tab selector -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;
+                background:var(--card);border:1px solid var(--border);
+                border-radius:14px;padding:10px 12px;align-items:center">
+      <span style="font-size:11px;font-weight:700;color:var(--muted);
+                   letter-spacing:1px;margin-right:4px">CHART TYPE</span>
+      {tab_btns}
+    </div>
+
+    <!-- Main chart -->
+    <div class="card" style="margin-bottom:22px;padding:20px">
+      <div class="sec-head" style="margin-bottom:14px">
+        <div>
+          <div class="sec-title" style="font-size:17px">{chart_title}</div>
+          <div class="sec-sub">{chart_sub}</div>
+        </div>
+        <span class="pill pill-blue" style="font-size:11px">Live Data</span>
+      </div>
+      <img src="{img_url}" style="width:100%;border-radius:10px;border:1px solid var(--border)">
+    </div>
+
+    <!-- Monthly mini-cards -->
+    <div class="sec-head" style="margin-bottom:14px">
+      <div><div class="sec-title">🗓 Monthly Breakdown</div>
+      <div class="sec-sub">Last 6 months at a glance</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:24px">
+      {m_cards}
+    </div>
+
+    <!-- Weekly table -->
     <div class="card">
-      <img src='/graph-image?t={datetime.now().timestamp()}' style='width:100%;border-radius:10px'>
+      <div class="sec-head" style="margin-bottom:14px">
+        <div><div class="sec-title">📅 Weekly Summary Table</div>
+        <div class="sec-sub">Last 6 weeks — trend indicator included</div></div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Week Starting</th><th>Present</th><th>Absent</th><th>Total</th><th>Rate</th><th>Trend</th></tr>
+          </thead>
+          <tbody>{w_rows or '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No weekly data yet</td></tr>'}</tbody>
+        </table>
+      </div>
     </div>"""
+
     return layout("Analytics", content, "analytics")
 
-@app.route("/graph-image")
-def graph_image():
-    p = os.path.join(GRAPH_DIR, "graph.png")
+@app.route("/graph-image/<filename>")
+def graph_image(filename):
+    allowed = {
+        "graph_line.png","graph_candle.png","graph_bar.png",
+        "graph_weekly.png","graph_monthly.png","graph_heatmap.png","graph.png"
+    }
+    if filename not in allowed:
+        return "Not found", 404
+    p = os.path.join(GRAPH_DIR, filename)
     return send_file(p) if os.path.exists(p) else ("Not found", 404)
 
 # ══════════════════════════════════════════════════════
