@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, redirect, url_for
+from flask import Flask, request, send_file, redirect, url_for, session
 import os, csv, base64, json, calendar as cal_mod
 from datetime import datetime, timedelta
 import cv2
@@ -9,9 +9,17 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 app = Flask(__name__)
+app.secret_key = "facenova_teacher_2024_secret"
 
-DATA_DIR  = "data"
-GRAPH_DIR = "graphs"
+# ── TEACHER CREDENTIALS (change these!)
+TEACHER_USERS = {
+    "teacher": "facenova123",
+    "admin":   "admin@123",
+}
+
+DATA_DIR     = "data"
+GRAPH_DIR    = "graphs"
+SECTIONS_FILE = os.path.join("data", "sections.json")
 os.makedirs(DATA_DIR,  exist_ok=True)
 os.makedirs(GRAPH_DIR, exist_ok=True)
 ATT_FILE = os.path.join(DATA_DIR, "attendance.csv")
@@ -20,31 +28,123 @@ face_detector = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
+# ──────────────────────────────────────────────────────
+#  SECTION HELPERS
+# ──────────────────────────────────────────────────────
+
+DEFAULT_SECTIONS = ["6A","6B","7A","7B","8A","8B","8C","9A","9B","10A"]
+
+def load_sections():
+    """Return list of section names."""
+    if os.path.exists(SECTIONS_FILE):
+        try:
+            return json.load(open(SECTIONS_FILE))
+        except:
+            pass
+    return list(DEFAULT_SECTIONS)
+
+def save_sections(sections):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    json.dump(sections, open(SECTIONS_FILE,"w"))
+
+def student_meta_file(name):
+    return os.path.join(DATA_DIR, name, "_meta.json")
+
+def get_student_section(name):
+    """Return section tag for a student, or empty string."""
+    mf = student_meta_file(name)
+    if os.path.exists(mf):
+        try:
+            return json.load(open(mf)).get("section","")
+        except:
+            pass
+    return ""
+
+def set_student_section(name, section):
+    mf = student_meta_file(name)
+    os.makedirs(os.path.dirname(mf), exist_ok=True)
+    meta = {}
+    if os.path.exists(mf):
+        try: meta = json.load(open(mf))
+        except: pass
+    meta["section"] = section
+    json.dump(meta, open(mf,"w"))
+
+def get_profile_image(name):
+    """
+    Returns URL of student profile image.
+    Priority: _profile.jpg > _profile.png > first face photo > None
+    """
+    user_dir = os.path.join(DATA_DIR, name)
+    if not os.path.isdir(user_dir):
+        return None
+    for ext in ("jpg","jpeg","png","webp"):
+        if os.path.exists(os.path.join(user_dir, f"_profile.{ext}")):
+            return f"/profile-img/{name}"
+    imgs = sorted([f for f in os.listdir(user_dir)
+                   if f.lower().endswith((".jpg",".jpeg",".png"))
+                   and not f.startswith("_")])
+    return f"/img/{name}/{imgs[0]}" if imgs else None
+
+def save_profile_image(name, file_storage):
+    """Save uploaded file as _profile.jpg (square-cropped, 400x400)."""
+    user_dir = os.path.join(DATA_DIR, name)
+    os.makedirs(user_dir, exist_ok=True)
+    for ext in ("jpg","jpeg","png","webp"):
+        old = os.path.join(user_dir, f"_profile.{ext}")
+        if os.path.exists(old):
+            os.remove(old)
+    dest = os.path.join(user_dir, "_profile.jpg")
+    file_storage.save(dest)
+    try:
+        img = cv2.imread(dest)
+        if img is not None:
+            h, w   = img.shape[:2]
+            side   = min(h, w)
+            y0, x0 = (h-side)//2, (w-side)//2
+            resized = cv2.resize(img[y0:y0+side, x0:x0+side], (400,400))
+            cv2.imwrite(dest, resized)
+    except:
+        pass
+
+def students_in_section(section=""):
+    """All students optionally filtered by section."""
+    all_s = sorted([
+        x for x in os.listdir(DATA_DIR)
+        if os.path.isdir(os.path.join(DATA_DIR, x))
+    ])
+    if not section:
+        return all_s
+    return [s for s in all_s if get_student_section(s) == section]
+
 # ══════════════════════════════════════════════════════
 #  DATA HELPERS
 # ══════════════════════════════════════════════════════
 
-def read_all_records():
-    """Return list of dicts: name, date, status, time"""
+def read_all_records(section=""):
+    """Return list of dicts: name, date, status, time, section.
+       Optionally filter by section."""
     rows = []
     if not os.path.exists(ATT_FILE):
         return rows
     with open(ATT_FILE, newline="") as f:
         for r in csv.reader(f):
             if len(r) >= 3:
-                rows.append({
-                    "name":   r[0],
-                    "date":   r[1],
-                    "status": r[2],
-                    "time":   r[3] if len(r) > 3 else "—"
-                })
+                rec = {
+                    "name":    r[0],
+                    "date":    r[1],
+                    "status":  r[2],
+                    "time":    r[3] if len(r) > 3 else "—",
+                    "section": r[4] if len(r) > 4 else get_student_section(r[0]),
+                }
+                if section and rec["section"] != section:
+                    continue
+                rows.append(rec)
     return rows
 
-def enrolled_students():
-    return sorted([
-        x for x in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, x))
-    ])
+def enrolled_students(section=""):
+    """Return all students, optionally filtered by section."""
+    return students_in_section(section)
 
 def stats_for_student(name, records=None):
     if records is None:
@@ -80,212 +180,756 @@ def daily_summary(date_str, records=None):
 
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
+/* ══ DESIGN TOKENS ══════════════════════════════════════ */
 :root{
-  --bg:#07090f; --surface:#0d1117; --card:#111827;
-  --border:rgba(255,255,255,0.07);
-  --blue:#3b82f6; --cyan:#06b6d4; --green:#10b981;
-  --red:#ef4444; --amber:#f59e0b; --purple:#8b5cf6;
-  --text:#f1f5f9; --muted:#64748b; --sidebar-w:248px;
+  /* backgrounds */
+  --bg:       #030712;
+  --surface:  #060b14;
+  --card:     #0a1120;
+  --card2:    #0d1526;
+  --border:   rgba(255,255,255,0.06);
+  --border2:  rgba(255,255,255,0.10);
+
+  /* brand */
+  --blue:     #3b82f6;
+  --blue-d:   #1d4ed8;
+  --cyan:     #06b6d4;
+  --green:    #10b981;
+  --green-l:  #34d399;
+  --red:      #ef4444;
+  --red-l:    #f87171;
+  --amber:    #f59e0b;
+  --amber-l:  #fcd34d;
+  --purple:   #8b5cf6;
+  --purple-l: #a78bfa;
+  --pink:     #ec4899;
+
+  /* text */
+  --text:     #f0f6ff;
+  --text2:    #94a3b8;
+  --muted:    #475569;
+
+  /* glow */
+  --glow-blue:   0 0 24px rgba(59,130,246,0.18);
+  --glow-cyan:   0 0 24px rgba(6,182,212,0.18);
+  --glow-green:  0 0 24px rgba(16,185,129,0.18);
+
+  --sidebar-w:252px;
+  --radius:16px;
+  --radius-sm:10px;
+  --transition:0.18s cubic-bezier(.4,0,.2,1);
 }
-body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;}
 
-/* ── SIDEBAR ── */
-.sidebar{width:var(--sidebar-w);background:var(--surface);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;padding:0 0 20px;}
-.sidebar-logo{padding:24px 20px 18px;border-bottom:1px solid var(--border);}
-.logo-mark{display:flex;align-items:center;gap:10px;}
-.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--blue),var(--cyan));
-  border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:17px;}
-.logo-text{font-family:'Space Grotesk',sans-serif;font-size:19px;font-weight:700;letter-spacing:-0.3px;}
-.logo-text span{color:var(--cyan);}
-.sidebar-section{font-size:10px;font-weight:700;letter-spacing:1.8px;color:var(--muted);
-  text-transform:uppercase;padding:18px 20px 6px;}
-.nav-item{display:flex;align-items:center;gap:11px;padding:10px 20px;color:var(--muted);
-  text-decoration:none;font-size:13.5px;font-weight:500;transition:all 0.15s;
-  border-left:3px solid transparent;margin:1px 0;}
-.nav-item svg{width:17px;height:17px;flex-shrink:0;}
-.nav-item:hover{color:var(--text);background:rgba(255,255,255,0.04);}
-.nav-active{color:var(--blue)!important;background:rgba(59,130,246,0.09)!important;border-left-color:var(--blue)!important;}
-.sidebar-footer{margin-top:auto;padding:16px 20px 0;border-top:1px solid var(--border);}
-.status-dot{display:inline-block;width:7px;height:7px;background:var(--green);border-radius:50%;
-  margin-right:7px;animation:blink 2s infinite;}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+/* ══ BASE ════════════════════════════════════════════════ */
+html{scroll-behavior:smooth}
+body{
+  font-family:'Inter',sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  display:flex;
+  line-height:1.6;
+  /* subtle noise */
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+}
 
-/* ── MAIN ── */
-.main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh;}
-.topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 28px;height:62px;
-  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
-.topbar-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:600;}
-.topbar-right{display:flex;align-items:center;gap:14px;}
-.tbadge{background:rgba(59,130,246,0.14);color:var(--blue);padding:4px 11px;
-  border-radius:20px;font-size:12px;font-weight:600;}
-.page{padding:28px;flex:1;}
+/* ══ SCROLLBAR ═══════════════════════════════════════════ */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:10px}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.18)}
 
-/* ── STAT CARDS ── */
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:20px;position:relative;overflow:hidden;}
-.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;}
-.s-blue::before{background:linear-gradient(90deg,var(--blue),var(--cyan));}
-.s-green::before{background:linear-gradient(90deg,var(--green),#34d399);}
-.s-red::before{background:linear-gradient(90deg,var(--red),#f87171);}
-.s-amber::before{background:linear-gradient(90deg,var(--amber),#fcd34d);}
-.s-purple::before{background:linear-gradient(90deg,var(--purple),#a78bfa);}
-.stat-ico{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;
-  font-size:17px;margin-bottom:12px;}
-.stat-val{font-family:'Space Grotesk',sans-serif;font-size:30px;font-weight:700;line-height:1;margin-bottom:3px;}
-.stat-lbl{font-size:12px;color:var(--muted);font-weight:500;}
+/* ══ GLASSMORPHISM MIXIN ═════════════════════════════════ */
+.glass{
+  background:rgba(255,255,255,0.028);
+  backdrop-filter:blur(20px) saturate(1.4);
+  -webkit-backdrop-filter:blur(20px) saturate(1.4);
+  border:1px solid var(--border2);
+}
 
-/* ── PROGRESS BAR ── */
-.pbar-wrap{background:rgba(255,255,255,0.06);border-radius:20px;height:8px;overflow:hidden;margin-top:8px;}
-.pbar{height:100%;border-radius:20px;transition:width 0.6s ease;}
-.pbar-green{background:linear-gradient(90deg,var(--green),#34d399);}
-.pbar-amber{background:linear-gradient(90deg,var(--amber),#fcd34d);}
-.pbar-red{background:linear-gradient(90deg,var(--red),#f87171);}
+/* ══ SIDEBAR ════════════════════════════════════════════ */
+.sidebar{
+  width:var(--sidebar-w);
+  background:linear-gradient(180deg,#060c1a 0%,#04080f 100%);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;
+  position:fixed;top:0;bottom:0;left:0;z-index:100;
+  overflow:hidden;
+}
+.sidebar::before{
+  content:'';position:absolute;top:-120px;left:-80px;
+  width:300px;height:300px;border-radius:50%;
+  background:radial-gradient(circle,rgba(59,130,246,0.08) 0%,transparent 70%);
+  pointer-events:none;
+}
 
-/* ── CARDS ── */
-.card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:22px;}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
-.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;}
-.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;}
-.sec-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700;}
-.sec-sub{font-size:12px;color:var(--muted);margin-top:2px;}
+.sidebar-logo{
+  padding:22px 20px 18px;
+  border-bottom:1px solid var(--border);
+  position:relative;
+}
+.logo-mark{display:flex;align-items:center;gap:11px}
+.logo-icon{
+  width:38px;height:38px;border-radius:11px;
+  background:linear-gradient(135deg,#2563eb,#06b6d4);
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;
+  box-shadow:0 0 18px rgba(37,99,235,0.5),inset 0 1px 0 rgba(255,255,255,0.15);
+}
+.logo-text{font-family:'Space Grotesk',sans-serif;font-size:19px;font-weight:700;letter-spacing:-0.5px}
+.logo-text span{
+  background:linear-gradient(90deg,var(--cyan),var(--blue));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+}
+.logo-tag{font-size:10px;font-weight:600;letter-spacing:1.5px;
+  color:var(--muted);text-transform:uppercase;margin-top:2px}
 
-/* ── TABLE ── */
-.tbl-wrap{overflow-x:auto;}
-table{width:100%;border-collapse:collapse;font-size:13.5px;}
-thead th{background:rgba(255,255,255,0.04);padding:11px 14px;text-align:left;
-  font-size:10.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;
-  color:var(--muted);border-bottom:1px solid var(--border);}
-tbody td{padding:13px 14px;border-bottom:1px solid var(--border);}
-tbody tr:hover{background:rgba(255,255,255,0.02);}
-tbody tr:last-child td{border-bottom:none;}
+.sidebar-section{
+  font-size:9.5px;font-weight:700;letter-spacing:2px;
+  color:var(--muted);text-transform:uppercase;
+  padding:18px 20px 7px;
+}
 
-/* ── PILLS ── */
-.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:20px;font-size:12px;font-weight:600;}
-.pill-green{background:rgba(16,185,129,0.13);color:#34d399;}
-.pill-red{background:rgba(239,68,68,0.13);color:#f87171;}
-.pill-amber{background:rgba(245,158,11,0.13);color:var(--amber);}
-.pill-blue{background:rgba(59,130,246,0.13);color:var(--blue);}
+.nav-item{
+  display:flex;align-items:center;gap:11px;
+  padding:9px 16px 9px 20px;
+  color:var(--text2);text-decoration:none;
+  font-size:13.5px;font-weight:500;
+  transition:all var(--transition);
+  border-left:2px solid transparent;
+  margin:1px 8px 1px 0;
+  border-radius:0 10px 10px 0;
+  position:relative;
+}
+.nav-item svg{width:17px;height:17px;flex-shrink:0;transition:transform var(--transition)}
+.nav-item:hover{
+  color:var(--text);
+  background:rgba(255,255,255,0.05);
+  border-left-color:rgba(255,255,255,0.2);
+}
+.nav-item:hover svg{transform:translateX(1px)}
+.nav-active{
+  color:var(--blue)!important;
+  background:linear-gradient(90deg,rgba(59,130,246,0.12),rgba(59,130,246,0.03))!important;
+  border-left-color:var(--blue)!important;
+  font-weight:600!important;
+}
+.nav-active::after{
+  content:'';position:absolute;right:0;top:50%;transform:translateY(-50%);
+  width:3px;height:60%;border-radius:2px 0 0 2px;
+  background:var(--blue);opacity:0.5;
+}
 
-/* ── BUTTONS ── */
-.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border:none;border-radius:9px;
-  font-size:13.5px;font-weight:600;cursor:pointer;transition:all 0.15s;text-decoration:none;font-family:'Inter',sans-serif;}
-.btn-primary{background:linear-gradient(135deg,var(--blue),#2563eb);color:white;}
-.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 18px rgba(59,130,246,0.38);}
-.btn-cyan{background:linear-gradient(135deg,var(--cyan),#0891b2);color:white;}
-.btn-cyan:hover{transform:translateY(-1px);box-shadow:0 4px 18px rgba(6,182,212,0.38);}
-.btn-ghost{background:rgba(255,255,255,0.06);color:var(--text);border:1px solid var(--border);}
-.btn-ghost:hover{background:rgba(255,255,255,0.1);}
-.btn-red{background:rgba(239,68,68,0.14);color:var(--red);border:1px solid rgba(239,68,68,0.28);}
-.btn-red:hover{background:rgba(239,68,68,0.24);}
-.btn-sm{padding:6px 13px;font-size:12.5px;}
+.sidebar-footer{
+  margin-top:auto;
+  padding:14px 20px 0;
+  border-top:1px solid var(--border);
+}
+.status-dot{
+  display:inline-block;width:7px;height:7px;
+  background:var(--green);border-radius:50%;
+  margin-right:8px;
+  box-shadow:0 0 6px var(--green);
+  animation:pulse-dot 2.5s infinite;
+}
+@keyframes pulse-dot{
+  0%,100%{opacity:1;box-shadow:0 0 6px var(--green)}
+  50%{opacity:0.5;box-shadow:0 0 2px var(--green)}
+}
 
-/* ── FORMS ── */
-.form-group{margin-bottom:16px;}
-label{display:block;font-size:12.5px;font-weight:600;color:var(--muted);margin-bottom:7px;letter-spacing:0.3px;}
-input[type=text],select,textarea{width:100%;background:rgba(255,255,255,0.05);border:1px solid var(--border);
-  border-radius:9px;padding:10px 13px;color:var(--text);font-size:13.5px;font-family:'Inter',sans-serif;
-  transition:border 0.15s;outline:none;}
-input[type=text]:focus,select:focus{border-color:var(--blue);background:rgba(59,130,246,0.06);}
-select option{background:#1e293b;}
-input[type=file]{width:100%;background:rgba(255,255,255,0.04);border:1px dashed var(--border);
-  border-radius:9px;padding:10px 13px;color:var(--muted);font-size:13px;font-family:'Inter',sans-serif;}
+/* ══ TOPBAR ═════════════════════════════════════════════ */
+.main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh}
+.topbar{
+  height:60px;padding:0 30px;
+  background:rgba(6,11,20,0.85);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:50;
+}
+.topbar-title{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:15.5px;font-weight:600;color:var(--text);
+}
+.topbar-right{display:flex;align-items:center;gap:12px}
+.tbadge{
+  background:linear-gradient(135deg,rgba(59,130,246,0.18),rgba(6,182,212,0.1));
+  border:1px solid rgba(59,130,246,0.25);
+  color:var(--blue);padding:4px 12px;
+  border-radius:20px;font-size:11.5px;font-weight:700;
+  letter-spacing:0.3px;
+}
+.page{padding:26px 30px;flex:1}
 
-/* ── ALERTS ── */
-.alert{padding:13px 16px;border-radius:11px;font-size:13.5px;margin-bottom:18px;
-  display:flex;align-items:center;gap:9px;}
-.alert-success{background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.25);color:#34d399;}
-.alert-error{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);color:#f87171;}
-.alert-info{background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.25);color:var(--blue);}
-.alert-warn{background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.25);color:var(--amber);}
+/* ══ STAT CARDS ═════════════════════════════════════════ */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+.stat{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:20px;position:relative;overflow:hidden;
+  transition:transform var(--transition),border-color var(--transition);
+}
+.stat:hover{transform:translateY(-2px);border-color:var(--border2)}
+.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:1.5px}
+.stat::after{
+  content:'';position:absolute;top:0;right:0;
+  width:80px;height:80px;border-radius:50%;
+  opacity:0.07;transform:translate(20px,-20px);
+}
+.s-blue::before{background:linear-gradient(90deg,var(--blue),var(--cyan))}
+.s-blue::after{background:var(--blue)}
+.s-green::before{background:linear-gradient(90deg,var(--green),var(--green-l))}
+.s-green::after{background:var(--green)}
+.s-red::before{background:linear-gradient(90deg,var(--red),var(--red-l))}
+.s-red::after{background:var(--red)}
+.s-amber::before{background:linear-gradient(90deg,var(--amber),var(--amber-l))}
+.s-amber::after{background:var(--amber)}
+.s-purple::before{background:linear-gradient(90deg,var(--purple),var(--purple-l))}
+.s-purple::after{background:var(--purple)}
+.stat-ico{
+  width:36px;height:36px;border-radius:9px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;margin-bottom:12px;
+}
+.stat-val{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:30px;font-weight:700;line-height:1;margin-bottom:3px;
+  letter-spacing:-0.5px;
+}
+.stat-lbl{font-size:12px;color:var(--text2);font-weight:500}
 
-/* ══ CALENDAR SPECIFIC ══ */
-.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;}
-.cal-month{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
-.cal-dow{text-align:center;font-size:11px;font-weight:700;color:var(--muted);padding:6px 0;
-  letter-spacing:0.8px;text-transform:uppercase;}
-.cal-cell{border-radius:10px;padding:10px 6px;text-align:center;min-height:62px;
-  border:1px solid var(--border);background:rgba(255,255,255,0.02);cursor:pointer;transition:all 0.15s;}
-.cal-cell:hover{background:rgba(255,255,255,0.06);}
-.cal-cell.empty{opacity:0;pointer-events:none;}
-.cal-cell.today{border-color:var(--blue);background:rgba(59,130,246,0.08);}
-.cal-cell.c-present{background:rgba(16,185,129,0.1);border-color:rgba(16,185,129,0.3);}
-.cal-cell.c-absent{background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);}
-.cal-cell.c-partial{background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.3);}
-.cal-day-num{font-size:14px;font-weight:600;margin-bottom:4px;}
-.cal-dots{display:flex;gap:3px;justify-content:center;flex-wrap:wrap;}
-.dot{width:6px;height:6px;border-radius:50%;}
-.dot-g{background:var(--green);}
-.dot-r{background:var(--red);}
-.cal-legend{display:flex;gap:18px;align-items:center;margin-top:14px;font-size:12px;color:var(--muted);}
-.leg-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:5px;}
+/* ══ PROGRESS ════════════════════════════════════════════ */
+.pbar-wrap{
+  background:rgba(255,255,255,0.05);
+  border-radius:20px;height:5px;overflow:hidden;
+}
+.pbar{height:100%;border-radius:20px;transition:width 0.8s cubic-bezier(.4,0,.2,1)}
+.pbar-green{background:linear-gradient(90deg,var(--green),var(--green-l))}
+.pbar-amber{background:linear-gradient(90deg,var(--amber),var(--amber-l))}
+.pbar-red{background:linear-gradient(90deg,var(--red),var(--red-l))}
+.pbar-blue{background:linear-gradient(90deg,var(--blue),var(--cyan))}
 
-/* ── DAILY LOG ── */
-.log-item{display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--border);}
-.log-item:last-child{border-bottom:none;}
-.log-avatar{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--purple));
-  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex-shrink:0;}
-.log-info{flex:1;}
-.log-name{font-weight:600;font-size:14px;}
-.log-time{font-size:12px;color:var(--muted);margin-top:1px;}
+/* ══ CARDS ═══════════════════════════════════════════════ */
+.card{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:22px;
+  transition:border-color var(--transition);
+}
+.card:hover{border-color:var(--border2)}
+.card-glass{
+  background:rgba(10,17,32,0.6);
+  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+  border:1px solid rgba(255,255,255,0.07);
+  border-radius:var(--radius);padding:22px;
+}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.sec-title{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:15px;font-weight:700;
+}
+.sec-sub{font-size:12px;color:var(--text2);margin-top:2px}
 
-/* ── STUDENT PROFILE CARD ── */
-.student-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;}
-.student-card{background:var(--card);border:1px solid var(--border);border-radius:14px;
-  padding:18px;text-align:center;transition:transform 0.15s;}
-.student-card:hover{transform:translateY(-3px);}
-.s-avatar{width:64px;height:64px;border-radius:50%;object-fit:cover;margin:0 auto 10px;
-  border:2px solid var(--border);}
-.s-avatar-placeholder{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));
-  display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 10px;
-  border:2px solid var(--border);}
-.s-name{font-weight:700;font-size:14px;margin-bottom:4px;}
-.s-pct{font-size:22px;font-weight:700;font-family:'Space Grotesk',sans-serif;}
+/* ══ TABLE ═══════════════════════════════════════════════ */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{
+  background:rgba(255,255,255,0.03);
+  padding:10px 14px;text-align:left;
+  font-size:10px;font-weight:700;
+  letter-spacing:1.2px;text-transform:uppercase;
+  color:var(--muted);border-bottom:1px solid var(--border);
+}
+tbody td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.04)}
+tbody tr:hover{background:rgba(255,255,255,0.025)}
+tbody tr:last-child td{border-bottom:none}
 
-/* ── STREAK BADGE ── */
-.streak{display:inline-flex;align-items:center;gap:4px;background:rgba(245,158,11,0.15);
-  color:var(--amber);border-radius:20px;padding:3px 10px;font-size:12px;font-weight:700;}
+/* ══ PILLS ═══════════════════════════════════════════════ */
+.pill{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 10px;border-radius:20px;
+  font-size:11.5px;font-weight:600;letter-spacing:0.2px;
+}
+.pill-green{background:rgba(16,185,129,0.12);color:var(--green-l);border:1px solid rgba(16,185,129,0.2)}
+.pill-red{background:rgba(239,68,68,0.12);color:var(--red-l);border:1px solid rgba(239,68,68,0.2)}
+.pill-amber{background:rgba(245,158,11,0.12);color:var(--amber-l);border:1px solid rgba(245,158,11,0.2)}
+.pill-blue{background:rgba(59,130,246,0.12);color:var(--blue);border:1px solid rgba(59,130,246,0.2)}
+.pill-purple{background:rgba(139,92,246,0.12);color:var(--purple-l);border:1px solid rgba(139,92,246,0.2)}
 
-/* ── SCAN RING ── */
-.scan-wrap{position:relative;display:inline-block;}
-.scan-ring{position:absolute;inset:-14px;border-radius:50%;border:2px solid var(--cyan);
-  opacity:0;animation:ring 2.5s ease-in-out infinite;}
-.scan-ring:nth-child(2){animation-delay:0.8s;}
-.scan-ring:nth-child(3){animation-delay:1.6s;}
-@keyframes ring{0%{transform:scale(0.85);opacity:0.8}100%{transform:scale(1.15);opacity:0}}
-video{border-radius:14px;display:block;}
+/* ══ BUTTONS ═════════════════════════════════════════════ */
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:9px 18px;border:none;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:600;cursor:pointer;
+  transition:all var(--transition);
+  text-decoration:none;font-family:'Inter',sans-serif;
+  letter-spacing:0.1px;position:relative;overflow:hidden;
+}
+.btn::before{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(255,255,255,0.07) 0%,transparent 100%);
+  pointer-events:none;border-radius:inherit;
+}
+.btn-primary{
+  background:linear-gradient(135deg,#2563eb,#1d4ed8);
+  color:white;
+  box-shadow:0 1px 0 rgba(255,255,255,0.1) inset,0 4px 12px rgba(37,99,235,0.3);
+}
+.btn-primary:hover{
+  background:linear-gradient(135deg,#3b82f6,#2563eb);
+  transform:translateY(-1px);
+  box-shadow:0 1px 0 rgba(255,255,255,0.1) inset,0 8px 20px rgba(37,99,235,0.4);
+}
+.btn-cyan{
+  background:linear-gradient(135deg,#0891b2,#0e7490);
+  color:white;
+  box-shadow:0 1px 0 rgba(255,255,255,0.1) inset,0 4px 12px rgba(8,145,178,0.3);
+}
+.btn-cyan:hover{
+  background:linear-gradient(135deg,#06b6d4,#0891b2);
+  transform:translateY(-1px);
+  box-shadow:0 1px 0 rgba(255,255,255,0.1) inset,0 8px 20px rgba(6,182,212,0.4);
+}
+.btn-ghost{
+  background:rgba(255,255,255,0.05);
+  color:var(--text2);
+  border:1px solid var(--border2);
+}
+.btn-ghost:hover{background:rgba(255,255,255,0.09);color:var(--text);border-color:rgba(255,255,255,0.15)}
+.btn-red{
+  background:rgba(239,68,68,0.12);color:var(--red-l);
+  border:1px solid rgba(239,68,68,0.22);
+}
+.btn-red:hover{background:rgba(239,68,68,0.22)}
+.btn-green{
+  background:linear-gradient(135deg,#059669,#047857);color:white;
+  box-shadow:0 4px 12px rgba(5,150,105,0.3);
+}
+.btn-green:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(16,185,129,0.4)}
+.btn-sm{padding:6px 13px;font-size:12px}
+.btn-xs{padding:4px 10px;font-size:11px}
 
-/* ── GALLERY ── */
-.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;}
-.gallery-item{background:var(--card);border:1px solid var(--border);border-radius:13px;overflow:hidden;transition:transform 0.15s;}
-.gallery-item:hover{transform:translateY(-3px);}
-.gallery-item img{width:100%;height:150px;object-fit:cover;display:block;}
-.gallery-item-info{padding:11px;}
-.gallery-item-name{font-size:13.5px;font-weight:600;}
-.gallery-item-stat{font-size:11.5px;color:var(--muted);margin-top:2px;}
+/* ══ FORMS ═══════════════════════════════════════════════ */
+.form-group{margin-bottom:15px}
+label{
+  display:block;font-size:12px;font-weight:600;
+  color:var(--text2);margin-bottom:7px;letter-spacing:0.4px;text-transform:uppercase;
+}
+input[type=text],input[type=password],select,textarea{
+  width:100%;
+  background:rgba(255,255,255,0.04);
+  border:1px solid var(--border2);
+  border-radius:var(--radius-sm);
+  padding:10px 13px;
+  color:var(--text);font-size:13.5px;
+  font-family:'Inter',sans-serif;
+  transition:border-color var(--transition),box-shadow var(--transition);
+  outline:none;
+}
+input[type=text]:focus,input[type=password]:focus,select:focus,textarea:focus{
+  border-color:var(--blue);
+  box-shadow:0 0 0 3px rgba(59,130,246,0.12);
+  background:rgba(59,130,246,0.04);
+}
+select option{background:#0a1120;color:var(--text)}
+input[type=file]{
+  width:100%;
+  background:rgba(255,255,255,0.03);
+  border:1.5px dashed rgba(255,255,255,0.12);
+  border-radius:var(--radius-sm);
+  padding:14px 13px;color:var(--text2);
+  font-size:13px;font-family:'Inter',sans-serif;
+  cursor:pointer;transition:border-color var(--transition);
+}
+input[type=file]:hover{border-color:var(--blue)}
 
-/* ── PAGE HERO ── */
-.hero{background:linear-gradient(135deg,rgba(59,130,246,0.1),rgba(6,182,212,0.06));
-  border:1px solid rgba(59,130,246,0.2);border-radius:18px;padding:24px 28px;
-  margin-bottom:24px;display:flex;align-items:center;justify-content:space-between;}
-.hero h1{font-family:'Space Grotesk',sans-serif;font-size:23px;font-weight:700;margin-bottom:5px;}
-.hero p{color:var(--muted);font-size:13.5px;}
+/* ══ ALERTS ══════════════════════════════════════════════ */
+.alert{
+  padding:12px 16px;border-radius:var(--radius-sm);
+  font-size:13.5px;margin-bottom:16px;
+  display:flex;align-items:center;gap:9px;
+  animation:slide-in 0.2s ease;
+}
+@keyframes slide-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.alert-success{background:rgba(16,185,129,0.09);border:1px solid rgba(16,185,129,0.22);color:var(--green-l)}
+.alert-error{background:rgba(239,68,68,0.09);border:1px solid rgba(239,68,68,0.22);color:var(--red-l)}
+.alert-info{background:rgba(59,130,246,0.09);border:1px solid rgba(59,130,246,0.22);color:var(--blue)}
+.alert-warn{background:rgba(245,158,11,0.09);border:1px solid rgba(245,158,11,0.22);color:var(--amber-l)}
 
-/* ── RESPONSIVE ── */
-@media(max-width:900px){
-  .sidebar{display:none;}
-  .main{margin-left:0;}
-  .stats-row{grid-template-columns:1fr 1fr;}
-  .grid-2,.grid-3{grid-template-columns:1fr;}
+/* ══ HERO BANNER ═════════════════════════════════════════ */
+.hero{
+  border-radius:20px;padding:26px 30px;margin-bottom:22px;
+  position:relative;overflow:hidden;
+  background:linear-gradient(135deg,rgba(37,99,235,0.15) 0%,rgba(6,182,212,0.06) 50%,rgba(139,92,246,0.08) 100%);
+  border:1px solid rgba(59,130,246,0.18);
+}
+.hero::before{
+  content:'';position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(59,130,246,0.12) 0%,transparent 70%);
+}
+.hero::after{
+  content:'';position:absolute;bottom:-40px;left:30%;
+  width:160px;height:160px;border-radius:50%;
+  background:radial-gradient(circle,rgba(6,182,212,0.07) 0%,transparent 70%);
+}
+.hero h1{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:23px;font-weight:800;margin-bottom:5px;
+  letter-spacing:-0.5px;position:relative;z-index:1;
+}
+.hero p{color:var(--text2);font-size:13.5px;position:relative;z-index:1;line-height:1.5}
+.hero-actions{margin-top:18px;display:flex;gap:10px;position:relative;z-index:1}
+
+/* ══ LOG ITEMS ═══════════════════════════════════════════ */
+.log-item{
+  display:flex;align-items:center;gap:13px;
+  padding:11px 0;border-bottom:1px solid rgba(255,255,255,0.04);
+  transition:background var(--transition);
+}
+.log-item:last-child{border-bottom:none}
+.log-avatar{
+  width:36px;height:36px;border-radius:9px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:14px;
+}
+.log-info{flex:1}
+.log-name{font-weight:600;font-size:13.5px}
+.log-time{font-size:11.5px;color:var(--text2);margin-top:1px}
+
+/* ══ STUDENT CARDS ═══════════════════════════════════════ */
+.student-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(188px,1fr));
+  gap:13px;
+}
+.student-card{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:20px 16px 16px;
+  text-align:center;
+  transition:all var(--transition);
+  position:relative;overflow:hidden;
+}
+.student-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,0.1),transparent);
+}
+.student-card:hover{
+  transform:translateY(-4px);
+  border-color:rgba(59,130,246,0.25);
+  box-shadow:0 12px 32px rgba(0,0,0,0.4);
+}
+.s-avatar{
+  width:72px;height:72px;border-radius:50%;object-fit:cover;
+  margin:0 auto 10px;
+  border:2px solid var(--border2);
+  box-shadow:0 0 0 4px rgba(255,255,255,0.03);
+  transition:box-shadow var(--transition);
+}
+.student-card:hover .s-avatar{box-shadow:0 0 0 4px rgba(59,130,246,0.15)}
+.s-avatar-placeholder{
+  width:72px;height:72px;border-radius:50%;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex;align-items:center;justify-content:center;
+  font-size:24px;font-weight:700;
+  margin:0 auto 10px;
+  border:2px solid rgba(139,92,246,0.3);
+}
+.s-name{font-weight:700;font-size:13.5px;margin-bottom:3px}
+.s-pct{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700}
+
+/* ══ GALLERY ═════════════════════════════════════════════ */
+.gallery-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(195px,1fr));
+  gap:13px;
+}
+.gallery-item{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);overflow:hidden;
+  transition:all var(--transition);
+}
+.gallery-item:hover{
+  transform:translateY(-4px);
+  border-color:rgba(59,130,246,0.2);
+  box-shadow:0 12px 28px rgba(0,0,0,0.4);
+}
+.gallery-item img{width:100%;height:155px;object-fit:cover;display:block}
+.gallery-item-info{padding:12px}
+.gallery-item-name{font-size:13.5px;font-weight:700}
+.gallery-item-stat{font-size:11.5px;color:var(--text2);margin-top:2px}
+
+/* ══ CALENDAR ════════════════════════════════════════════ */
+.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.cal-month{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.cal-dow{
+  text-align:center;font-size:10.5px;font-weight:700;
+  color:var(--muted);padding:6px 0;
+  letter-spacing:0.8px;text-transform:uppercase;
+}
+.cal-cell{
+  border-radius:var(--radius-sm);padding:9px 5px;text-align:center;
+  min-height:60px;border:1px solid var(--border);
+  background:rgba(255,255,255,0.015);
+  cursor:pointer;transition:all var(--transition);
+  position:relative;
+}
+.cal-cell:hover{background:rgba(255,255,255,0.05);border-color:var(--border2)}
+.cal-cell.empty{opacity:0;pointer-events:none}
+.cal-cell.today{border-color:rgba(59,130,246,0.4);background:rgba(59,130,246,0.07)}
+.cal-cell.c-present{background:rgba(16,185,129,0.08);border-color:rgba(16,185,129,0.25)}
+.cal-cell.c-absent{background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.25)}
+.cal-cell.c-partial{background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.25)}
+.cal-day-num{font-size:13px;font-weight:600;margin-bottom:4px}
+.cal-dots{display:flex;gap:3px;justify-content:center;flex-wrap:wrap}
+.dot{width:5px;height:5px;border-radius:50%}
+.dot-g{background:var(--green)}
+.dot-r{background:var(--red)}
+.cal-legend{display:flex;gap:16px;align-items:center;margin-top:12px;font-size:12px;color:var(--text2)}
+.leg-dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:5px}
+
+/* ══ STREAK BADGE ════════════════════════════════════════ */
+.streak{
+  display:inline-flex;align-items:center;gap:4px;
+  background:rgba(245,158,11,0.12);
+  border:1px solid rgba(245,158,11,0.2);
+  color:var(--amber-l);border-radius:20px;
+  padding:3px 9px;font-size:11.5px;font-weight:700;
+}
+
+/* ══ SCAN RING ═══════════════════════════════════════════ */
+.scan-wrap{position:relative;display:inline-block}
+.scan-ring{
+  position:absolute;inset:-14px;border-radius:50%;
+  border:1.5px solid var(--cyan);opacity:0;
+  animation:ring 2.8s ease-in-out infinite;
+}
+.scan-ring:nth-child(2){animation-delay:0.9s}
+.scan-ring:nth-child(3){animation-delay:1.8s}
+@keyframes ring{
+  0%{transform:scale(0.82);opacity:0.9}
+  100%{transform:scale(1.18);opacity:0}
+}
+video{border-radius:var(--radius);display:block}
+
+/* ══ SECTION TABS ════════════════════════════════════════ */
+.sec-tabs{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+.sec-tab{
+  padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:600;
+  text-decoration:none;border:1px solid var(--border2);
+  color:var(--text2);background:rgba(255,255,255,0.03);
+  transition:all var(--transition);
+}
+.sec-tab:hover{background:rgba(255,255,255,0.07);color:var(--text)}
+.sec-tab-active{
+  background:rgba(59,130,246,0.14)!important;
+  border-color:rgba(59,130,246,0.35)!important;
+  color:var(--blue)!important;
+}
+.sec-tab-all{background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.2);color:var(--purple-l)}
+.sec-tab-all.sec-tab-active{background:rgba(139,92,246,0.18)!important;color:var(--purple-l)!important}
+.sec-badge{
+  display:inline-block;padding:2px 9px;border-radius:6px;
+  font-size:10.5px;font-weight:700;letter-spacing:0.5px;
+  background:rgba(59,130,246,0.12);color:var(--blue);
+  border:1px solid rgba(59,130,246,0.2);
+}
+
+/* ══ SECTION OVERVIEW ════════════════════════════════════ */
+.section-card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;
+  transition:all var(--transition);
+  cursor:pointer;text-decoration:none;display:block;
+  position:relative;overflow:hidden;
+}
+.section-card::before{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(135deg,rgba(255,255,255,0.02) 0%,transparent 60%);
+  pointer-events:none;
+}
+.section-card:hover{transform:translateY(-4px);box-shadow:0 16px 40px rgba(0,0,0,0.5)}
+.section-card-name{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:800;margin-bottom:3px}
+.section-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:13px}
+
+/* ══ PROFILE IMAGE ═══════════════════════════════════════ */
+.profile-avatar-wrap{
+  position:relative;width:110px;height:110px;
+  margin:0 auto 14px;cursor:pointer;
+}
+.profile-avatar-wrap img,
+.profile-avatar-wrap .avatar-placeholder{
+  width:110px;height:110px;border-radius:50%;object-fit:cover;
+  border:2.5px solid var(--border2);display:block;
+  transition:filter var(--transition);
+  box-shadow:0 0 0 4px rgba(255,255,255,0.03);
+}
+.profile-avatar-wrap .avatar-placeholder{
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex;align-items:center;justify-content:center;
+  font-size:36px;font-weight:700;color:white;
+}
+.profile-avatar-wrap:hover img,
+.profile-avatar-wrap:hover .avatar-placeholder{filter:brightness(0.5)}
+.profile-avatar-overlay{
+  position:absolute;inset:0;border-radius:50%;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  opacity:0;transition:opacity var(--transition);
+  pointer-events:none;gap:3px;
+}
+.profile-avatar-wrap:hover .profile-avatar-overlay{opacity:1}
+.profile-avatar-overlay span{font-size:20px}
+.profile-avatar-overlay small{font-size:10.5px;font-weight:700;color:white;letter-spacing:0.4px}
+.profile-upload-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:6px 15px;border-radius:20px;font-size:12px;font-weight:600;
+  background:rgba(59,130,246,0.12);
+  border:1px solid rgba(59,130,246,0.25);
+  color:var(--blue);cursor:pointer;
+  transition:all var(--transition);margin-top:4px;
+}
+.profile-upload-btn:hover{background:rgba(59,130,246,0.22)}
+.profile-preview{
+  width:110px;height:110px;border-radius:50%;object-fit:cover;
+  border:2.5px solid var(--cyan);display:none;margin:0 auto 8px;
+}
+
+/* ══ TEACHER DASHBOARD ═══════════════════════════════════ */
+.td-hero{
+  border-radius:20px;padding:26px 30px;margin-bottom:20px;
+  position:relative;overflow:hidden;
+  background:linear-gradient(135deg,
+    rgba(37,99,235,0.18) 0%,
+    rgba(139,92,246,0.1) 50%,
+    rgba(6,182,212,0.08) 100%);
+  border:1px solid rgba(59,130,246,0.2);
+}
+.td-hero::before{
+  content:'';position:absolute;top:-80px;right:-60px;
+  width:280px;height:280px;border-radius:50%;
+  background:radial-gradient(circle,rgba(139,92,246,0.12) 0%,transparent 70%);
+}
+.td-hero::after{
+  content:'👨‍🏫';
+  position:absolute;right:28px;top:50%;transform:translateY(-50%);
+  font-size:72px;opacity:0.1;
+}
+.td-hero h1{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:24px;font-weight:800;margin-bottom:5px;
+  letter-spacing:-0.5px;position:relative;z-index:1;
+}
+.td-hero p{color:var(--text2);font-size:13.5px;position:relative;z-index:1}
+
+/* table row risk coloring */
+.risk-high td:first-child{border-left:2.5px solid var(--red)!important}
+.risk-mid  td:first-child{border-left:2.5px solid var(--amber)!important}
+.risk-ok   td:first-child{border-left:2.5px solid var(--green)!important}
+
+.absent-chip{
+  display:inline-flex;align-items:center;gap:7px;
+  background:rgba(239,68,68,0.08);
+  border:1px solid rgba(239,68,68,0.2);
+  border-radius:10px;padding:7px 12px;margin:4px;
+  transition:background var(--transition);
+}
+.absent-chip:hover{background:rgba(239,68,68,0.14)}
+.absent-chip-avatar{
+  width:26px;height:26px;border-radius:50%;
+  background:linear-gradient(135deg,var(--red),#f87171);
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;flex-shrink:0;
+}
+.qa-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.qa-btn{
+  display:flex;align-items:center;gap:10px;padding:12px 14px;
+  background:rgba(255,255,255,0.03);border:1px solid var(--border);
+  border-radius:var(--radius-sm);text-decoration:none;color:var(--text);
+  font-size:13px;font-weight:600;transition:all var(--transition);
+}
+.qa-btn:hover{background:rgba(255,255,255,0.07);border-color:var(--border2);transform:translateY(-1px)}
+.qa-btn-icon{
+  width:32px;height:32px;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;flex-shrink:0;
+}
+.ring-wrap{position:relative;width:110px;height:110px;margin:0 auto 8px}
+.ring-wrap svg{transform:rotate(-90deg)}
+.ring-val{
+  position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;flex-direction:column;text-align:center;
+}
+.ring-num{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700}
+.ring-lbl{font-size:10px;color:var(--text2);margin-top:1px}
+.notice{
+  padding:11px 15px;border-radius:var(--radius-sm);
+  font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:9px;
+}
+.notice-warn{background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);color:var(--amber-l)}
+.notice-red{background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);color:var(--red-l)}
+
+/* ══ LOGIN ═══════════════════════════════════════════════ */
+.login-wrap{
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(ellipse at 35% 40%,rgba(37,99,235,0.14) 0%,transparent 55%),
+             radial-gradient(ellipse at 75% 75%,rgba(139,92,246,0.1) 0%,transparent 50%),
+             var(--bg);
+}
+.login-card{
+  background:rgba(10,17,32,0.85);
+  backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:22px;padding:42px 40px;width:100%;max-width:400px;
+  position:relative;overflow:hidden;
+  box-shadow:0 32px 80px rgba(0,0,0,0.6);
+}
+.login-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(59,130,246,0.6),rgba(6,182,212,0.4),transparent);
+}
+.login-card::after{
+  content:'';position:absolute;top:-100px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(59,130,246,0.08) 0%,transparent 70%);
+  pointer-events:none;
+}
+.login-logo{text-align:center;margin-bottom:28px}
+.login-logo-icon{
+  width:62px;height:62px;
+  background:linear-gradient(135deg,#2563eb,#06b6d4);
+  border-radius:18px;display:flex;align-items:center;justify-content:center;
+  font-size:28px;margin:0 auto 12px;
+  box-shadow:0 0 28px rgba(37,99,235,0.4),inset 0 1px 0 rgba(255,255,255,0.15);
+}
+.login-title{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700}
+.login-sub{color:var(--text2);font-size:13px;margin-top:3px}
+
+
+/* ══ RESPONSIVE ══════════════════════════════════════════ */
+@media(max-width:960px){
+  .sidebar{display:none}
+  .main{margin-left:0}
+  .stats-row{grid-template-columns:1fr 1fr}
+  .grid-2,.grid-3{grid-template-columns:1fr}
 }
 @media(max-width:560px){
-  .page{padding:16px;}
-  .stats-row{grid-template-columns:1fr 1fr;}
-  .hero{flex-direction:column;gap:14px;}
+  .page{padding:16px}
+  .stats-row{grid-template-columns:1fr 1fr}
+  .hero{padding:20px}
+  .hero h1{font-size:19px}
+  .login-card{padding:30px 22px}
 }
 </style>
 """
@@ -298,10 +942,12 @@ NAV = [
     ("scan",      "/scan",      "M15 10l4.553-2.069A1 1 0 0121 8.82V15a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z", "Face Scan"),
     ("enroll",    "/enroll",    "M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z", "Enroll"),
     ("students",  "/students",  "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z", "Students"),
+    ("sections",  "/sections",  "M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10", "Sections"),
     ("calendar",  "/calendar",  "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z", "Calendar"),
     ("daily",     "/daily",     "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01", "Daily Log"),
     ("gallery",   "/gallery",   "M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z", "Gallery"),
     ("analytics", "/graph",     "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z", "Analytics"),
+    ("teacher",   "/teacher",   "M12 14l9-5-9-5-9 5 9 5z M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z", "Teacher"),
     ("admin",     "/admin",     "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z", "Admin"),
 ]
 
@@ -320,39 +966,64 @@ def layout(page_title, content, active="dashboard"):
             icon = nav_icon(path_d)
         nav_html += f'<a href="{href}" class="nav-item {cls}">{icon}<span>{label}</span></a>'
 
+    today_str = datetime.now().strftime("%Y-%m-%d")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{page_title} — FaceNova</title>
+<title>{page_title} — FaceNova AI</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
 {CSS}
 </head>
 <body>
+
+<!-- ── SIDEBAR ─────────────────────────── -->
 <aside class="sidebar">
   <div class="sidebar-logo">
     <div class="logo-mark">
       <div class="logo-icon">🧠</div>
-      <div class="logo-text">Face<span>Nova</span></div>
+      <div>
+        <div class="logo-text">Face<span>Nova</span></div>
+        <div class="logo-tag">AI Attendance</div>
+      </div>
     </div>
   </div>
-  <div class="sidebar-section">Navigation</div>
+  <div class="sidebar-section">Menu</div>
   <nav>{nav_html}</nav>
   <div class="sidebar-footer">
-    <div style="font-size:12.5px;color:var(--muted)"><span class="status-dot"></span>System Online</div>
-    <div style="font-size:11px;color:var(--muted);margin-top:5px">AI Attendance v3.0</div>
-  </div>
-</aside>
-<div class="main">
-  <div class="topbar">
-    <div class="topbar-title">{page_title}</div>
-    <div class="topbar-right">
-      <span id="clock" style="font-size:12.5px;color:var(--muted)"></span>
-      <span class="tbadge">AI Active</span>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div style="width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700">FN</div>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--text)">FaceNova</div>
+        <div style="font-size:10.5px;color:var(--muted)">v4.0 · AI Active</div>
+      </div>
+    </div>
+    <div style="font-size:11.5px;color:var(--text2);display:flex;align-items:center">
+      <span class="status-dot"></span>All systems online
     </div>
   </div>
+</aside>
+
+<!-- ── MAIN ──────────────────────────────── -->
+<div class="main">
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:12px">
+      <div class="topbar-title">{page_title}</div>
+      <div style="height:16px;width:1px;background:var(--border)"></div>
+      <div style="font-size:11.5px;color:var(--muted)">{today_str}</div>
+    </div>
+    <div class="topbar-right">
+      <span id="clock" style="font-size:12px;color:var(--text2)"></span>
+      <div style="width:1px;height:16px;background:var(--border)"></div>
+      <span class="tbadge">🟢 AI Online</span>
+      <a href="/teacher" style="width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,0.06);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;text-decoration:none;font-size:14px;transition:background 0.15s" title="Teacher Portal">👨‍🏫</a>
+    </div>
+  </div>
+
   <div class="page">{content}</div>
 </div>
+
 <script>
 function tick(){{
   const n=new Date();
@@ -362,6 +1033,7 @@ function tick(){{
 }}
 tick();setInterval(tick,1000);
 </script>
+
 </body></html>"""
 
 # ══════════════════════════════════════════════════════
@@ -396,11 +1068,19 @@ def home():
 
     content = f"""
     <div class="hero">
-      <div>
-        <h1>👋 Welcome to FaceNova</h1>
-        <p>AI-powered face recognition attendance — real-time, smart, effortless.</p>
+      <div style="position:relative;z-index:1">
+        <div style="display:inline-flex;align-items:center;gap:7px;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.25);border-radius:20px;padding:4px 12px;font-size:11.5px;font-weight:600;color:var(--blue);margin-bottom:12px">
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--blue);animation:pulse-dot 2s infinite"></span>
+          AI Face Recognition Active
+        </div>
+        <h1>Welcome to FaceNova 🧠</h1>
+        <p>Next-generation AI attendance system for offices, schools &amp; colleges.<br>Real-time recognition · Smart analytics · Zero friction.</p>
+        <div class="hero-actions">
+          <a href="/scan" class="btn btn-cyan">🎥 Start Face Scan</a>
+          <a href="/students" class="btn btn-ghost">👥 Students</a>
+          <a href="/sections" class="btn btn-ghost">📚 Sections</a>
+        </div>
       </div>
-      <a href="/scan" class="btn btn-cyan">🎥 &nbsp;Start Face Scan</a>
     </div>
 
     <div class="stats-row">
@@ -459,22 +1139,25 @@ def home():
     </div>
 
     <div class="grid-3">
-      <div class="card" style="text-align:center">
-        <div style="font-size:40px;margin-bottom:10px">📅</div>
+      <div class="card" style="text-align:center;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:0;right:0;height:1.5px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+        <div style="font-size:38px;margin-bottom:10px">📅</div>
         <div class="sec-title">Smart Calendar</div>
-        <div style="font-size:13px;color:var(--muted);margin:8px 0 16px">Monthly attendance heatmap</div>
+        <div style="font-size:12.5px;color:var(--text2);margin:7px 0 15px;line-height:1.5">Monthly heatmap with daily attendance breakdown</div>
         <a href="/calendar" class="btn btn-ghost" style="width:100%;justify-content:center">Open Calendar</a>
       </div>
-      <div class="card" style="text-align:center">
-        <div style="font-size:40px;margin-bottom:10px">👤</div>
+      <div class="card" style="text-align:center;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:0;right:0;height:1.5px;background:linear-gradient(90deg,var(--purple),var(--pink))"></div>
+        <div style="font-size:38px;margin-bottom:10px">👤</div>
         <div class="sec-title">Student Profiles</div>
-        <div style="font-size:13px;color:var(--muted);margin:8px 0 16px">Per-student stats & tracking</div>
+        <div style="font-size:12.5px;color:var(--text2);margin:7px 0 15px;line-height:1.5">Per-student stats, streaks & attendance history</div>
         <a href="/students" class="btn btn-ghost" style="width:100%;justify-content:center">View Students</a>
       </div>
-      <div class="card" style="text-align:center">
-        <div style="font-size:40px;margin-bottom:10px">📋</div>
+      <div class="card" style="text-align:center;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:0;right:0;height:1.5px;background:linear-gradient(90deg,var(--green),var(--cyan))"></div>
+        <div style="font-size:38px;margin-bottom:10px">📋</div>
         <div class="sec-title">Daily Log</div>
-        <div style="font-size:13px;color:var(--muted);margin:8px 0 16px">Full record of today's scans</div>
+        <div style="font-size:12.5px;color:var(--text2);margin:7px 0 15px;line-height:1.5">Full present/absent record with timestamps</div>
         <a href="/daily" class="btn btn-ghost" style="width:100%;justify-content:center">View Today</a>
       </div>
     </div>
@@ -628,9 +1311,11 @@ def calendar():
 @app.route("/daily")
 def daily():
     date_str  = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
-    records   = read_all_records()
+    section  = request.args.get("section","")
+    sections = load_sections()
+    records   = read_all_records(section)
     present, absent = daily_summary(date_str, records)
-    students  = enrolled_students()
+    students  = enrolled_students(section)
 
     # figure out who has NO record today at all
     scanned_names = {r["name"] for r in records if r["date"] == date_str}
@@ -746,40 +1431,55 @@ def daily():
 
 @app.route("/students")
 def students():
-    all_students = enrolled_students()
+    section      = request.args.get("section","")
+    sections     = load_sections()
+    all_students = enrolled_students(section)
     records      = read_all_records()
 
+    # section tab bar
+    tab_all  = "sec-tab sec-tab-all" + (" sec-tab-active" if not section else "")
+    tabs_html = f'<a href="/students" class="{tab_all}">🌐 All</a>'
+    for s in sections:
+        active = " sec-tab-active" if s == section else ""
+        count  = len(students_in_section(s))
+        tabs_html += f'<a href="/students?section={s}" class="sec-tab{active}">{s} <span style="font-size:11px;opacity:0.7">({count})</span></a>'
+
     if not all_students:
-        content = """<div class="card" style="text-align:center;padding:60px">
+        content = f"""
+        <div class="sec-head" style="margin-bottom:16px">
+          <div><div class="sec-title" style="font-size:20px">👥 Students</div></div>
+          <a href="/enroll" class="btn btn-primary">+ Enroll New</a>
+        </div>
+        <div class="sec-tabs">{tabs_html}</div>
+        <div class="card" style="text-align:center;padding:60px">
           <div style="font-size:50px;margin-bottom:14px">👥</div>
-          <div class="sec-title">No Students Enrolled</div>
-          <div style="color:var(--muted);margin-top:8px;margin-bottom:20px">Enroll students to see their profiles here.</div>
+          <div class="sec-title">No Students{" in section " + section if section else ""}</div>
+          <div style="color:var(--muted);margin-top:8px;margin-bottom:20px">Enroll students to see profiles.</div>
           <a href="/enroll" class="btn btn-primary">+ Enroll First Student</a>
         </div>"""
         return layout("Students", content, "students")
 
     cards = ""
     for name in all_students:
-        s = stats_for_student(name, records)
+        s         = stats_for_student(name, records)
         pct_color = "var(--green)" if s["pct"]>=75 else ("var(--amber)" if s["pct"]>=50 else "var(--red)")
         pbar_cls  = "pbar-green" if s["pct"]>=75 else ("pbar-amber" if s["pct"]>=50 else "pbar-red")
+        stud_sec  = get_student_section(name)
 
-        # profile pic
-        user_dir = os.path.join(DATA_DIR, name)
-        img_tag  = ""
-        if os.path.isdir(user_dir):
-            imgs = [f for f in os.listdir(user_dir) if f.lower().endswith((".jpg",".jpeg",".png"))]
-            if imgs:
-                img_tag = f'<img src="/img/{name}/{imgs[0]}" class="s-avatar">'
-        if not img_tag:
+        prof_url = get_profile_image(name)
+        if prof_url:
+            img_tag = f'<img src="{prof_url}" class="s-avatar">'
+        else:
             img_tag = f'<div class="s-avatar-placeholder">{name[0].upper()}</div>'
 
         streak_html = f'<div class="streak">🔥 {s["streak"]}d streak</div>' if s["streak"]>0 else ""
+        sec_html    = f'<div style="margin-bottom:6px"><span class="sec-badge">{stud_sec}</span></div>' if stud_sec else ""
 
         cards += f"""
         <div class="student-card">
           <a href="/student/{name}" style="text-decoration:none;color:inherit">
             {img_tag}
+            {sec_html}
             <div class="s-name">{name}</div>
             <div class="s-pct" style="color:{pct_color}">{s['pct']}%</div>
             <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px">{s['present']}P / {s['absent']}A of {s['total']}</div>
@@ -788,12 +1488,17 @@ def students():
           </a>
         </div>"""
 
+    sec_title = f"Section {section}" if section else "All Students"
     content = f"""
-    <div class="sec-head" style="margin-bottom:20px">
-      <div><div class="sec-title" style="font-size:20px">👥 Student Profiles</div>
-      <div class="sec-sub">Click a student to view their full attendance history</div></div>
-      <a href="/enroll" class="btn btn-primary">+ Enroll New</a>
+    <div class="sec-head" style="margin-bottom:16px">
+      <div><div class="sec-title" style="font-size:20px">👥 {sec_title}</div>
+      <div class="sec-sub">{len(all_students)} student(s) · click a card to view full history</div></div>
+      <div style="display:flex;gap:8px">
+        <a href="/sections" class="btn btn-ghost btn-sm">📚 Sections</a>
+        <a href="/enroll" class="btn btn-primary">+ Enroll New</a>
+      </div>
     </div>
+    <div class="sec-tabs">{tabs_html}</div>
     <div class="student-grid">{cards}</div>
     """
     return layout("Students", content, "students")
@@ -802,14 +1507,39 @@ def students():
 #  SINGLE STUDENT DETAIL
 # ══════════════════════════════════════════════════════
 
+
+@app.route("/profile-img/<name>")
+def profile_img(name):
+    user_dir = os.path.join(DATA_DIR, name)
+    for ext in ("jpg","jpeg","png","webp"):
+        pf = os.path.join(user_dir, f"_profile.{ext}")
+        if os.path.exists(pf):
+            return send_file(pf)
+    return ("Not found", 404)
+
+
+@app.route("/student/<name>/upload-profile", methods=["POST"])
+def upload_profile(name):
+    f = request.files.get("profile_photo")
+    if not f or f.filename == "":
+        return redirect(f"/student/{name}?msg=no_file")
+    try:
+        save_profile_image(name, f)
+        return redirect(f"/student/{name}?msg=ok")
+    except Exception as e:
+        return redirect(f"/student/{name}?msg=err")
+
 @app.route("/student/<name>")
 def student_detail(name):
     records = read_all_records()
     mine    = [r for r in records if r["name"] == name]
     s       = stats_for_student(name, records)
 
-    pbar_cls  = "pbar-green" if s["pct"]>=75 else ("pbar-amber" if s["pct"]>=50 else "pbar-red")
+    pbar_cls   = "pbar-green" if s["pct"]>=75 else ("pbar-amber" if s["pct"]>=50 else "pbar-red")
     status_msg = "🟢 Good Standing" if s["pct"]>=75 else ("🟡 Needs Improvement" if s["pct"]>=50 else "🔴 Low Attendance — At Risk")
+    stud_sec   = get_student_section(name)
+    sections   = load_sections()
+    sec_options = "".join(f'<option value="{s}" {"selected" if s==stud_sec else ""}>{s}</option>' for s in sections)
 
     rows = "".join(f"""<tr>
       <td>{r['date']}</td><td>{r['time']}</td>
@@ -817,32 +1547,88 @@ def student_detail(name):
     </tr>""" for r in reversed(mine)) or \
     '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:20px">No records</td></tr>'
 
-    # profile pic
-    user_dir = os.path.join(DATA_DIR, name)
-    img_tag  = ""
-    if os.path.isdir(user_dir):
-        imgs = [f for f in os.listdir(user_dir) if f.lower().endswith((".jpg",".jpeg",".png"))]
-        if imgs:
-            img_tag = f'<img src="/img/{name}/{imgs[0]}" style="width:80px;height:80px;border-radius:50%;object-fit:cover;border:2px solid var(--border);margin-bottom:12px">'
-    if not img_tag:
-        img_tag = f'<div style="width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 12px">{name[0].upper()}</div>'
+    # profile image — priority: custom _profile > first face photo > initials
+    profile_url = get_profile_image(name)
+    msg         = request.args.get("msg","")
+
+    if profile_url:
+        avatar_inner = f'<img src="{profile_url}?t={datetime.now().timestamp()}" style="width:110px;height:110px;border-radius:50%;object-fit:cover;border:3px solid var(--border)">'
+    else:
+        avatar_inner = f'<div class="avatar-placeholder">{name[0].upper()}</div>'
+
+    msg_html = ""
+    if msg == "ok":
+        msg_html = '<div class="alert alert-success" style="margin-bottom:12px">✅ Profile photo updated!</div>'
+    elif msg == "err":
+        msg_html = '<div class="alert alert-error" style="margin-bottom:12px">❌ Upload failed. Try again.</div>'
+    elif msg == "no_file":
+        msg_html = '<div class="alert alert-warn" style="margin-bottom:12px">⚠️ Please select a photo first.</div>'
+
+    sec_badge = f'<div style="margin-bottom:10px"><span class="sec-badge">{stud_sec}</span></div>' if stud_sec else ""
 
     content = f"""
-    <a href="/students" class="btn btn-ghost btn-sm" style="margin-bottom:18px">← Back to Students</a>
+    <div style="display:flex;gap:8px;margin-bottom:18px">
+      <a href="/students" class="btn btn-ghost btn-sm">← All Students</a>
+      {f'<a href="/students?section={stud_sec}" class="btn btn-ghost btn-sm">← Section {stud_sec}</a>' if stud_sec else ""}
+    </div>
+    {msg_html}
     <div class="grid-2" style="align-items:start">
+
+      <!-- LEFT: profile card -->
       <div class="card" style="text-align:center">
-        {img_tag}
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;margin-bottom:4px">{name}</div>
-        <div style="margin-bottom:14px">{status_msg}</div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:42px;font-weight:700;margin-bottom:4px">{s['pct']}%</div>
-        <div style="color:var(--muted);font-size:13px;margin-bottom:14px">Attendance Rate</div>
-        <div class="pbar-wrap" style="margin-bottom:16px"><div class="pbar {pbar_cls}" style="width:{s['pct']}%"></div></div>
-        <div style="display:flex;justify-content:space-around;font-size:13px">
-          <div><div style="font-weight:700;font-size:20px;color:var(--green)">{s['present']}</div><div style="color:var(--muted)">Present</div></div>
-          <div><div style="font-weight:700;font-size:20px;color:var(--red)">{s['absent']}</div><div style="color:var(--muted)">Absent</div></div>
-          <div><div style="font-weight:700;font-size:20px;color:var(--amber)">{s['streak']}</div><div style="color:var(--muted)">Streak</div></div>
+
+        <!-- clickable avatar with hover overlay -->
+        <div class="profile-avatar-wrap" onclick="document.getElementById('profileInput').click()" title="Click to change photo">
+          {avatar_inner}
+          <div class="profile-avatar-overlay">
+            <span>📷</span>
+            <small>Change Photo</small>
+          </div>
+        </div>
+
+        <!-- hidden upload form -->
+        <form id="profileForm" action="/student/{name}/upload-profile"
+              method="POST" enctype="multipart/form-data" style="display:none">
+          <input type="file" id="profileInput" name="profile_photo"
+                 accept="image/*" onchange="previewAndUpload(this)">
+        </form>
+
+        <!-- live preview (shows before submit) -->
+        <img id="profilePreview" class="profile-preview" alt="Preview">
+
+        <!-- upload button -->
+        <div>
+          <label for="profileInput" class="profile-upload-btn">
+            📷 &nbsp;{("Change" if profile_url else "Upload")} Profile Photo
+          </label>
+        </div>
+
+        <div style="margin-top:14px">
+          {sec_badge}
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;margin-bottom:4px">{name}</div>
+          <div style="margin-bottom:14px;font-size:13.5px">{status_msg}</div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:42px;font-weight:700;margin-bottom:4px">{s['pct']}%</div>
+          <div style="color:var(--muted);font-size:13px;margin-bottom:14px">Attendance Rate</div>
+          <div class="pbar-wrap" style="margin-bottom:16px"><div class="pbar {pbar_cls}" style="width:{s['pct']}%"></div></div>
+          <div style="display:flex;justify-content:space-around;font-size:13px">
+            <div><div style="font-weight:700;font-size:20px;color:var(--green)">{s['present']}</div><div style="color:var(--muted)">Present</div></div>
+            <div><div style="font-weight:700;font-size:20px;color:var(--red)">{s['absent']}</div><div style="color:var(--muted)">Absent</div></div>
+            <div><div style="font-weight:700;font-size:20px;color:var(--amber)">{s['streak']}</div><div style="color:var(--muted)">Streak</div></div>
+          </div>
+        </div>
+
+        <!-- face photos used for recognition -->
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;margin-bottom:10px">FACE PHOTOS (RECOGNITION)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center" id="facePhotos">
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:8px">
+            These are used by the AI scanner. Profile photo above is for display only.
+          </div>
         </div>
       </div>
+
+      <!-- RIGHT: history card -->
       <div class="card">
         <div class="sec-title" style="margin-bottom:16px">📋 Attendance History</div>
         <div class="tbl-wrap">
@@ -852,9 +1638,262 @@ def student_detail(name):
           </table>
         </div>
       </div>
+
     </div>
+
+    <script>
+    function previewAndUpload(input) {{
+      const file = input.files[0];
+      if (!file) return;
+      // show live preview
+      const reader = new FileReader();
+      reader.onload = e => {{
+        const prev = document.getElementById('profilePreview');
+        prev.src = e.target.result;
+        prev.style.display = 'block';
+        // hide old avatar while previewing
+        const wrap = prev.previousElementSibling ? document.querySelector('.profile-avatar-wrap') : null;
+      }};
+      reader.readAsDataURL(file);
+      // auto-submit after short delay so preview is visible
+      setTimeout(() => document.getElementById('profileForm').submit(), 600);
+    }}
+
+    // load face photo thumbnails via existing img route
+    (function(){{
+      const faceDiv = document.getElementById('facePhotos');
+      // face photos are in /img/{name}/ — we'll just link to the gallery
+      faceDiv.innerHTML = '<a href="/gallery" class="btn btn-ghost btn-sm" style="font-size:11.5px">View in Gallery →</a>';
+    }})();
+    </script>
     """
     return layout(name, content, "students")
+
+
+# ══════════════════════════════════════════════════════
+#  SECTIONS — OVERVIEW + MANAGEMENT
+# ══════════════════════════════════════════════════════
+
+SECTION_COLORS = [
+    ("59,130,246","3b82f6"),  # blue
+    ("6,182,212","06b6d4"),   # cyan
+    ("16,185,129","10b981"),  # green
+    ("139,92,246","8b5cf6"),  # purple
+    ("245,158,11","f59e0b"),  # amber
+    ("239,68,68","ef4444"),   # red
+    ("236,72,153","ec4899"),  # pink
+    ("20,184,166","14b8a6"),  # teal
+]
+
+def section_color(idx):
+    r, h = SECTION_COLORS[idx % len(SECTION_COLORS)]
+    return r, h
+
+@app.route("/sections")
+def sections_overview():
+    sections = load_sections()
+    records  = read_all_records()
+    today    = datetime.now().strftime("%Y-%m-%d")
+
+    cards_html = ""
+    for i, sec in enumerate(sections):
+        rgb, hex_col = section_color(i)
+        stud_list    = students_in_section(sec)
+        count        = len(stud_list)
+        sec_records  = [r for r in records if r.get("section") == sec]
+        total_r      = len(sec_records)
+        present_r    = sum(1 for r in sec_records if r["status"]=="Present")
+        pct          = round(present_r/total_r*100) if total_r else 0
+        pbar_cls     = "pbar-green" if pct>=75 else ("pbar-amber" if pct>=50 else "pbar-red")
+
+        today_sec = [r for r in sec_records if r["date"]==today]
+        today_p   = sum(1 for r in today_sec if r["status"]=="Present")
+        today_pct = round(today_p/len(today_sec)*100) if today_sec else 0
+
+        # avatar strip (up to 5)
+        avatars = ""
+        for s in stud_list[:5]:
+            user_dir = os.path.join(DATA_DIR, s)
+            if os.path.isdir(user_dir):
+                imgs = [f for f in os.listdir(user_dir)
+                        if f.lower().endswith((".jpg",".jpeg",".png")) and not f.startswith("_")]
+                if imgs:
+                    avatars += f'<img src="/img/{s}/{imgs[0]}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--bg);margin-left:-6px">' 
+                    continue
+            avatars += f'<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,rgba({rgb},0.8),rgba({rgb},0.4));display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;border:2px solid var(--bg);margin-left:-6px">{s[0].upper()}</div>'
+        more_label   = "" if count<=5 else f'<span style="font-size:11px;color:var(--muted);margin-left:10px">+{count-5} more</span>'
+        avatar_strip = f'<div style="display:flex;align-items:center;margin-top:12px;padding-left:6px">{avatars}{more_label}</div>'
+
+        cards_html += f"""
+        <a href="/students?section={sec}" class="section-card" style="border-top:3px solid #{hex_col}">
+          <div style="display:flex;align-items:start;justify-content:space-between;margin-bottom:12px">
+            <div>
+              <div class="section-card-name" style="color:#{hex_col}">{sec}</div>
+              <div style="font-size:12px;color:var(--muted)">{count} student{"s" if count!=1 else ""}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700">{pct}%</div>
+              <div style="font-size:11px;color:var(--muted)">overall</div>
+            </div>
+          </div>
+          <div class="pbar-wrap"><div class="pbar {pbar_cls}" style="width:{pct}%"></div></div>
+          <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:12px;color:var(--muted)">
+            <span>Today: <strong style="color:var(--text)">{today_p} present</strong></span>
+            <span>{today_pct}% rate</span>
+          </div>
+          {avatar_strip}
+          <div style="display:flex;gap:8px;margin-top:14px">
+            <span style="font-size:12px;padding:4px 10px;border-radius:6px;background:rgba({rgb},0.1);color:#{hex_col}">View Students →</span>
+            <span style="font-size:12px;padding:4px 10px;border-radius:6px;background:rgba(255,255,255,0.04);color:var(--muted)">Daily Log</span>
+          </div>
+        </a>"""
+
+    # summary KPIs
+    total_students = sum(len(students_in_section(s)) for s in sections)
+    all_records    = len(records)
+    all_present    = sum(1 for r in records if r["status"]=="Present")
+    overall_pct    = round(all_present/all_records*100) if all_records else 0
+
+    content = f"""
+    <div class="sec-head" style="margin-bottom:10px">
+      <div><div class="sec-title" style="font-size:20px">📚 Class Sections</div>
+      <div class="sec-sub">Overview of all sections — click to filter students</div></div>
+      <div style="display:flex;gap:8px">
+        <a href="/sections/manage" class="btn btn-ghost btn-sm">⚙ Manage Sections</a>
+        <a href="/enroll" class="btn btn-primary">+ Enroll Student</a>
+      </div>
+    </div>
+
+    <div class="stats-row" style="margin-bottom:22px">
+      <div class="stat s-blue">
+        <div class="stat-ico" style="background:rgba(59,130,246,0.15)">📚</div>
+        <div class="stat-val">{len(sections)}</div>
+        <div class="stat-lbl">Total Sections</div>
+      </div>
+      <div class="stat s-green">
+        <div class="stat-ico" style="background:rgba(16,185,129,0.15)">👥</div>
+        <div class="stat-val">{total_students}</div>
+        <div class="stat-lbl">Total Students</div>
+      </div>
+      <div class="stat s-amber">
+        <div class="stat-ico" style="background:rgba(245,158,11,0.15)">📊</div>
+        <div class="stat-val">{overall_pct}%</div>
+        <div class="stat-lbl">Overall Rate</div>
+      </div>
+      <div class="stat s-purple" style="border-top:2px solid var(--purple)">
+        <div class="stat-ico" style="background:rgba(139,92,246,0.15)">📋</div>
+        <div class="stat-val">{all_records}</div>
+        <div class="stat-lbl">Total Records</div>
+      </div>
+    </div>
+
+    <div class="section-grid">{cards_html or '<div class="card" style="text-align:center;padding:40px;grid-column:1/-1"><div style="font-size:50px;margin-bottom:14px">📚</div><div class="sec-title">No Sections Yet</div><a href="/sections/manage" class="btn btn-primary" style="margin-top:16px;display:inline-flex">⚙ Create Sections</a></div>'}</div>
+    """
+    return layout("Sections", content, "sections")
+
+
+@app.route("/sections/manage", methods=["GET","POST"])
+def sections_manage():
+    sections = load_sections()
+    msg = ""
+
+    if request.method == "POST":
+        action = request.form.get("action","")
+        if action == "add":
+            new_sec = request.form.get("new_section","").strip().upper()
+            if new_sec and new_sec not in sections:
+                sections.append(new_sec)
+                save_sections(sections)
+                msg = f'<div class="alert alert-success">✅ Section <strong>{new_sec}</strong> added.</div>'
+            elif new_sec in sections:
+                msg = f'<div class="alert alert-warn">⚠️ Section {new_sec} already exists.</div>'
+        elif action == "delete":
+            del_sec = request.form.get("del_section","")
+            if del_sec in sections:
+                sections.remove(del_sec)
+                save_sections(sections)
+                msg = f'<div class="alert alert-success">✅ Section <strong>{del_sec}</strong> removed.</div>'
+        elif action == "reassign":
+            student  = request.form.get("student","").strip()
+            new_sec  = request.form.get("new_sec","").strip()
+            if student and new_sec:
+                set_student_section(student, new_sec)
+                msg = f'<div class="alert alert-success">✅ {student} moved to <strong>{new_sec}</strong>.</div>'
+
+    # build rows
+    section_rows = ""
+    for i, sec in enumerate(sections):
+        rgb, hex_col = section_color(i)
+        count = len(students_in_section(sec))
+        section_rows += f"""<tr>
+          <td><span style="font-weight:700;color:#{hex_col}">{sec}</span></td>
+          <td>{count}</td>
+          <td>
+            <form method="POST" style="display:inline" onsubmit="return confirm('Delete section {sec}?')">
+              <input type="hidden" name="action" value="delete">
+              <input type="hidden" name="del_section" value="{sec}">
+              <button type="submit" class="btn btn-red btn-sm">🗑 Remove</button>
+            </form>
+            <a href="/students?section={sec}" class="btn btn-ghost btn-sm">View →</a>
+          </td>
+        </tr>"""
+
+    # reassign student
+    all_s = enrolled_students()
+    student_opts = "".join(f'<option value="{s}">{s} ({get_student_section(s) or "unassigned"})</option>' for s in all_s)
+    sec_opts     = "".join(f'<option value="{s}">{s}</option>' for s in sections)
+
+    content = f"""
+    <div style="margin-bottom:18px">
+      <a href="/sections" class="btn btn-ghost btn-sm">← Back to Sections</a>
+    </div>
+    {msg}
+    <div class="grid-2" style="align-items:start">
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:16px">📚 All Sections</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Section</th><th>Students</th><th>Actions</th></tr></thead>
+            <tbody>{section_rows or '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:20px">No sections yet</td></tr>'}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <div class="sec-title" style="font-size:14px;margin-bottom:12px">➕ Add New Section</div>
+          <form method="POST" style="display:flex;gap:8px">
+            <input type="hidden" name="action" value="add">
+            <input type="text" name="new_section" placeholder="e.g. 10B" style="flex:1;margin:0" required>
+            <button type="submit" class="btn btn-primary">Add</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:16px">🔄 Reassign Student to Section</div>
+        <form method="POST">
+          <input type="hidden" name="action" value="reassign">
+          <div class="form-group">
+            <label>Student</label>
+            <select name="student" required>
+              <option value="">— Select Student —</option>
+              {student_opts}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Move to Section</label>
+            <select name="new_sec" required>
+              <option value="">— Select Section —</option>
+              {sec_opts}
+            </select>
+          </div>
+          <button type="submit" class="btn btn-cyan" style="width:100%;justify-content:center;padding:12px">
+            🔄 Reassign
+          </button>
+        </form>
+      </div>
+    </div>
+    """
+    return layout("Manage Sections", content, "sections")
+
 
 # ══════════════════════════════════════════════════════
 #  ENROLL
@@ -862,10 +1901,13 @@ def student_detail(name):
 
 @app.route("/enroll")
 def enroll_page():
-    content = """
+    sections    = load_sections()
+    sec_options = "".join(f'<option value="{s}">{s}</option>' for s in sections)
+    content = f"""
     <div class="sec-head" style="margin-bottom:20px">
       <div><div class="sec-title" style="font-size:20px">📸 Enroll New Student</div>
-      <div class="sec-sub">Upload face photos to register in the system</div></div>
+      <div class="sec-sub">Upload face photos and assign to a class section</div></div>
+      <a href="/sections" class="btn btn-ghost btn-sm">⚙ Manage Sections</a>
     </div>
     <div class="grid-2">
       <div class="card">
@@ -874,6 +1916,13 @@ def enroll_page():
           <div class="form-group">
             <label>Full Name</label>
             <input type='text' name='name' placeholder='e.g. Rahul Sharma' required>
+          </div>
+          <div class="form-group">
+            <label>Class Section</label>
+            <select name='section' required>
+              <option value="">— Select Section —</option>
+              {sec_options}
+            </select>
           </div>
           <div class="form-group">
             <label>Face Photos (3–5 recommended)</label>
@@ -888,6 +1937,7 @@ def enroll_page():
         <div class="sec-title">📌 Enrollment Tips</div>
         <div class="alert alert-info">Use 3–5 clear, well-lit photos for best recognition accuracy.</div>
         <div style="display:flex;flex-direction:column;gap:10px;font-size:13.5px">
+          <div>✅ Assign the correct class section</div>
           <div>✅ Front-facing, eyes open</div>
           <div>✅ Good lighting, no shadows</div>
           <div>✅ No sunglasses or masks</div>
@@ -901,23 +1951,29 @@ def enroll_page():
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
-        name  = request.form["name"].strip()
-        files = request.files.getlist("photos")
+        name    = request.form["name"].strip()
+        section = request.form.get("section","").strip()
+        files   = request.files.getlist("photos")
         os.makedirs(os.path.join(DATA_DIR, name), exist_ok=True)
+        if section:
+            set_student_section(name, section)
         saved = 0
         for f in files:
             f.save(os.path.join(DATA_DIR, name, f"{datetime.now().timestamp()}.jpg"))
             saved += 1
+        sec_badge = f'<span class="sec-badge" style="margin-left:8px">{section}</span>' if section else ""
         content = f"""
-        <div class="alert alert-success">✅ {name} enrolled with {saved} photo(s).</div>
+        <div class="alert alert-success">✅ {name} enrolled with {saved} photo(s) in section {section or "—"}.</div>
         <div class="card" style="text-align:center;padding:40px">
           <div style="font-size:56px;margin-bottom:14px">🎉</div>
-          <div class="sec-title" style="font-size:20px;margin-bottom:6px">{name} Enrolled!</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:6px">
+            <div class="sec-title" style="font-size:20px">{name}</div>{sec_badge}
+          </div>
           <div style="color:var(--muted);margin-bottom:22px">{saved} face photo(s) saved.</div>
           <div style="display:flex;gap:10px;justify-content:center">
             <a href="/enroll" class="btn btn-primary">Enroll Another</a>
-            <a href="/students" class="btn btn-ghost">View Students</a>
-            <a href="/" class="btn btn-ghost">Dashboard</a>
+            <a href="/sections" class="btn btn-ghost">View Sections</a>
+            <a href="/students" class="btn btn-ghost">All Students</a>
           </div>
         </div>"""
         return layout("Enrolled", content, "enroll")
@@ -1073,8 +2129,9 @@ def camera():
         today    = datetime.now().strftime("%Y-%m-%d")
         time_str = datetime.now().strftime("%H:%M:%S")
 
+        student_section = get_student_section(person) if person not in ("Unknown","No Face Detected") else ""
         with open(ATT_FILE, "a", newline="") as f:
-            csv.writer(f).writerow([person, today, status, time_str])
+            csv.writer(f).writerow([person, today, status, time_str, student_section])
 
         pill_cls  = "pill-green" if status == "Present" else "pill-red"
         alert_cls = "alert-success" if status == "Present" else "alert-error"
@@ -1144,15 +2201,15 @@ def gallery():
         user_dir = os.path.join(DATA_DIR, name)
         if not os.path.isdir(user_dir):
             continue
-        imgs = [f for f in os.listdir(user_dir) if f.lower().endswith((".jpg",".jpeg",".png"))]
-        if not imgs:
+        prof_url = get_profile_image(name)
+        if not prof_url:
             continue
         s = stats_for_student(name, records)
         pbar_cls = "pbar-green" if s["pct"]>=75 else ("pbar-amber" if s["pct"]>=50 else "pbar-red")
         cards += f"""
         <a href="/student/{name}" style="text-decoration:none">
           <div class="gallery-item">
-            <img src='/img/{name}/{imgs[0]}' alt='{name}'>
+            <img src='{prof_url}' alt='{name}'>
             <div class="gallery-item-info">
               <div class="gallery-item-name">{name}</div>
               <div class="gallery-item-stat">{s['pct']}% attendance · {s['present']}P / {s['absent']}A</div>
@@ -1816,6 +2873,367 @@ def graph_image(filename):
     p = os.path.join(GRAPH_DIR, filename)
     return send_file(p) if os.path.exists(p) else ("Not found", 404)
 
+
+# ══════════════════════════════════════════════════════
+#  TEACHER AUTH + DASHBOARD
+# ══════════════════════════════════════════════════════
+
+def teacher_required(f):
+    """Decorator: redirect to login if not authenticated."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("teacher_logged_in"):
+            return redirect("/teacher/login")
+        return f(*args, **kwargs)
+    return decorated
+
+def pct_ring(pct, size=110, stroke=10):
+    """SVG donut ring showing percentage."""
+    r   = (size - stroke) / 2
+    circ = 2 * 3.14159 * r
+    dash = circ * pct / 100
+    col  = "#10b981" if pct >= 75 else ("#f59e0b" if pct >= 50 else "#ef4444")
+    return f"""
+    <div class="ring-wrap" style="width:{size}px;height:{size}px">
+      <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">
+        <circle cx="{size/2}" cy="{size/2}" r="{r}"
+                fill="none" stroke="#1a2234" stroke-width="{stroke}"/>
+        <circle cx="{size/2}" cy="{size/2}" r="{r}"
+                fill="none" stroke="{col}" stroke-width="{stroke}"
+                stroke-linecap="round"
+                stroke-dasharray="{dash:.1f} {circ:.1f}"/>
+      </svg>
+      <div class="ring-val">
+        <div class="ring-num" style="color:{col}">{pct}%</div>
+        <div class="ring-lbl">Rate</div>
+      </div>
+    </div>"""
+
+# ── LOGIN ─────────────────────────────────────────────
+
+@app.route("/teacher/login", methods=["GET","POST"])
+def teacher_login():
+    error = ""
+    if request.method == "POST":
+        username = request.form.get("username","").strip()
+        password = request.form.get("password","").strip()
+        if TEACHER_USERS.get(username) == password:
+            session["teacher_logged_in"] = True
+            session["teacher_name"]      = username
+            return redirect("/teacher")
+        else:
+            error = "Invalid username or password."
+
+    error_html = f'<div class="alert alert-error">{error}</div>' if error else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teacher Login — FaceNova</title>
+{CSS}
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-icon">👨‍🏫</div>
+      <div class="login-title">Teacher Portal</div>
+      <div class="login-sub">Sign in to access your class dashboard</div>
+    </div>
+    {error_html}
+    <form method="POST" action="/teacher/login">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" name="username" placeholder="e.g. teacher" required autofocus>
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" name="password" placeholder="••••••••" required>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;font-size:15px;margin-top:6px">
+        🔐 &nbsp;Sign In
+      </button>
+    </form>
+    <div style="text-align:center;margin-top:20px;font-size:12px;color:var(--muted)">
+      Default: <strong>teacher</strong> / <strong>facenova123</strong>
+    </div>
+    <div style="text-align:center;margin-top:14px">
+      <a href="/" style="color:var(--blue);font-size:13px">← Back to Main Dashboard</a>
+    </div>
+  </div>
+</div>
+</body></html>"""
+    return html
+
+@app.route("/teacher/logout")
+def teacher_logout():
+    session.clear()
+    return redirect("/teacher/login")
+
+# ── MAIN TEACHER DASHBOARD ────────────────────────────
+
+@app.route("/teacher")
+@teacher_required
+def teacher_dashboard():
+    section   = request.args.get("section","")
+    sections  = load_sections()
+    records   = read_all_records(section)
+    students  = enrolled_students(section)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    teacher   = session.get("teacher_name", "Teacher")
+
+    present_today, absent_today = daily_summary(today_str, records)
+    total_students = len(students)
+    pct_today = round(len(present_today) / (len(present_today)+len(absent_today)) * 100) if (present_today or absent_today) else 0
+    total_records = len(records)
+    all_present   = sum(1 for r in records if r["status"] == "Present")
+    overall_pct   = round(all_present / total_records * 100) if total_records else 0
+
+    # ── KPI cards
+    kpi_pbar = "pbar-green" if pct_today>=75 else ("pbar-amber" if pct_today>=50 else "pbar-red")
+    kpis = f"""
+    <div class="stats-row" style="margin-bottom:20px">
+      <div class="stat s-blue">
+        <div class="stat-ico" style="background:rgba(59,130,246,0.15)">👥</div>
+        <div class="stat-val">{total_students}</div>
+        <div class="stat-lbl">Total Students</div>
+      </div>
+      <div class="stat s-green">
+        <div class="stat-ico" style="background:rgba(16,185,129,0.15)">✅</div>
+        <div class="stat-val">{len(present_today)}</div>
+        <div class="stat-lbl">Present Today</div>
+      </div>
+      <div class="stat s-red">
+        <div class="stat-ico" style="background:rgba(239,68,68,0.15)">❌</div>
+        <div class="stat-val">{len(absent_today)}</div>
+        <div class="stat-lbl">Absent Today</div>
+      </div>
+      <div class="stat s-purple" style="border-top:2px solid transparent;border-image:linear-gradient(90deg,var(--purple),#a78bfa) 1">
+        <div class="stat-ico" style="background:rgba(139,92,246,0.15)">📊</div>
+        <div class="stat-val">{overall_pct}%</div>
+        <div class="stat-lbl">Overall Rate</div>
+      </div>
+    </div>
+    <div class="card" style="padding:16px 20px;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:12px;font-weight:700;color:var(--muted)">TODAY'S ATTENDANCE RATE</span>
+        <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:18px">{pct_today}%</span>
+      </div>
+      <div class="pbar-wrap"><div class="pbar {kpi_pbar}" style="width:{pct_today}%"></div></div>
+    </div>"""
+
+    # ── Absent list with chips
+    if absent_today:
+        chips = "".join(f"""
+        <div class="absent-chip">
+          <div class="absent-chip-avatar">{r["name"][0].upper()}</div>
+          <span style="font-size:13px;font-weight:600">{r["name"]}</span>
+          <span style="font-size:11px;color:var(--muted)">· {r["time"]}</span>
+        </div>""" for r in absent_today)
+        absent_block = f'<div style="display:flex;flex-wrap:wrap;gap:4px">{chips}</div>'
+    else:
+        absent_block = '<div style="color:var(--muted);font-size:13px;padding:8px 0">🎉 No absentees recorded today!</div>'
+
+    # ── Student performance table
+    at_risk   = []
+    below_avg = []
+    good      = []
+    perf_rows = ""
+    for name in students:
+        s = stats_for_student(name, records)
+        risk_cls = "risk-high" if s["pct"]<50 else ("risk-mid" if s["pct"]<75 else "risk-ok")
+        pill_cls = "pill-red" if s["pct"]<50 else ("pill-amber" if s["pct"]<75 else "pill-green")
+        trend_icon = "📈" if s["streak"]>2 else ("📉" if s["pct"]<50 else "➡️")
+
+        # last seen
+        mine = [r for r in records if r["name"]==name]
+        last_seen = mine[-1]["date"] if mine else "Never"
+
+        # profile pic
+        user_dir = os.path.join(DATA_DIR, name)
+        if os.path.isdir(user_dir):
+            imgs = [f for f in os.listdir(user_dir) if f.lower().endswith((".jpg",".jpeg",".png"))]
+            avatar = f'<img src="/img/{name}/{imgs[0]}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:1.5px solid var(--border)">' if imgs else f'<div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">{name[0].upper()}</div>'
+        else:
+            avatar = f'<div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">{name[0].upper()}</div>'
+
+        perf_rows += f"""<tr class="{risk_cls}">
+          <td>
+            <div style="display:flex;align-items:center;gap:10px">
+              {avatar}
+              <div>
+                <div style="font-weight:600;font-size:13.5px">{name}</div>
+                <div style="font-size:11px;color:var(--muted)">Last seen: {last_seen}</div>
+              </div>
+            </div>
+          </td>
+          <td style="font-weight:700;color:var(--green)">{s["present"]}</td>
+          <td style="font-weight:700;color:var(--red)">{s["absent"]}</td>
+          <td>{s["total"]}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="pbar-wrap" style="width:70px;flex-shrink:0">
+                <div class="pbar {"pbar-green" if s["pct"]>=75 else ("pbar-amber" if s["pct"]>=50 else "pbar-red")}" style="width:{s["pct"]}%"></div>
+              </div>
+              <span class="pill {pill_cls}" style="font-size:11px">{s["pct"]}%</span>
+            </div>
+          </td>
+          <td>{trend_icon} {"🔥"+str(s["streak"])+"d" if s["streak"]>0 else "—"}</td>
+          <td><a href="/student/{name}" class="btn btn-ghost btn-sm" style="font-size:11.5px">View →</a></td>
+        </tr>"""
+
+        if s["pct"] < 50:   at_risk.append(name)
+        elif s["pct"] < 75: below_avg.append(name)
+        else:                good.append(name)
+
+    # ── Risk notices
+    notices = ""
+    if at_risk:
+        notices += f'<div class="notice notice-red">🚨 <strong>{len(at_risk)} student(s) at risk</strong> (below 50%): {", ".join(at_risk)}</div>'
+    if below_avg:
+        notices += f'<div class="notice notice-warn">⚠️ <strong>{len(below_avg)} student(s) need attention</strong> (50–74%): {", ".join(below_avg)}</div>'
+
+    # ── Quick actions
+    quick_actions = """
+    <div class="qa-grid">
+      <a href="/scan" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(6,182,212,0.15)">🎥</div>
+        <div><div style="font-weight:700">Start Scan</div><div style="font-size:11.5px;color:var(--muted)">Mark attendance now</div></div>
+      </a>
+      <a href="/daily" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(59,130,246,0.15)">📋</div>
+        <div><div style="font-weight:700">Today's Log</div><div style="font-size:11.5px;color:var(--muted)">Full daily record</div></div>
+      </a>
+      <a href="/enroll" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(16,185,129,0.15)">➕</div>
+        <div><div style="font-weight:700">Enroll Student</div><div style="font-size:11.5px;color:var(--muted)">Add new face</div></div>
+      </a>
+      <a href="/calendar" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(139,92,246,0.15)">📅</div>
+        <div><div style="font-weight:700">Calendar</div><div style="font-size:11.5px;color:var(--muted)">Monthly view</div></div>
+      </a>
+      <a href="/graph" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(245,158,11,0.15)">📊</div>
+        <div><div style="font-weight:700">Analytics</div><div style="font-size:11.5px;color:var(--muted)">Charts & trends</div></div>
+      </a>
+      <a href="/download" class="qa-btn">
+        <div class="qa-btn-icon" style="background:rgba(16,185,129,0.12)">⬇</div>
+        <div><div style="font-weight:700">Export CSV</div><div style="font-size:11.5px;color:var(--muted)">Download records</div></div>
+      </a>
+    </div>"""
+
+    # ── Class performance rings (good / below / at-risk)
+    rings = f"""
+    <div style="display:flex;gap:20px;justify-content:space-around;padding:10px 0">
+      <div style="text-align:center">
+        {pct_ring(len(good)*100//total_students if total_students else 0, 90, 8)}
+        <div style="font-size:12px;color:var(--green);font-weight:600;margin-top:4px">On Track</div>
+        <div style="font-size:11px;color:var(--muted)">{len(good)} students</div>
+      </div>
+      <div style="text-align:center">
+        {pct_ring(len(below_avg)*100//total_students if total_students else 0, 90, 8)}
+        <div style="font-size:12px;color:var(--amber);font-weight:600;margin-top:4px">Need Help</div>
+        <div style="font-size:11px;color:var(--muted)">{len(below_avg)} students</div>
+      </div>
+      <div style="text-align:center">
+        {pct_ring(len(at_risk)*100//total_students if total_students else 0, 90, 8)}
+        <div style="font-size:12px;color:var(--red);font-weight:600;margin-top:4px">At Risk</div>
+        <div style="font-size:11px;color:var(--muted)">{len(at_risk)} students</div>
+      </div>
+    </div>"""
+
+    # section tab bar for teacher dashboard
+    tab_all  = "sec-tab sec-tab-all" + (" sec-tab-active" if not section else "")
+    sec_tabs = f'<a href="/teacher" class="{tab_all}">🌐 All Sections</a>'
+    for s in sections:
+        active = " sec-tab-active" if s==section else ""
+        sec_tabs += f'<a href="/teacher?section={s}" class="sec-tab{active}">{s}</a>'
+
+    sec_label = f"Section {section}" if section else "All Sections"
+
+    content = f"""
+    <div class="td-hero">
+      <h1>Welcome back, {teacher.title()} 👋</h1>
+      <p>Class overview for <strong>{today_str}</strong> · {sec_label} · FaceNova AI</p>
+      <div style="margin-top:16px;display:flex;gap:10px">
+        <a href="/scan" class="btn btn-cyan">🎥 Start Scan</a>
+        <a href="/teacher/logout" class="btn btn-ghost" style="font-size:12.5px">Sign Out</a>
+      </div>
+    </div>
+    <div class="sec-tabs">{sec_tabs}</div>
+
+    {notices}
+    {kpis}
+
+    <div class="grid-2" style="margin-bottom:20px">
+      <!-- Absent today -->
+      <div class="card">
+        <div class="sec-head" style="margin-bottom:14px">
+          <div>
+            <div class="sec-title">❌ Absent Today</div>
+            <div class="sec-sub">{len(absent_today)} student(s) not marked present</div>
+          </div>
+          <span class="pill pill-red">{len(absent_today)}</span>
+        </div>
+        {absent_block}
+      </div>
+
+      <!-- Class performance rings -->
+      <div class="card">
+        <div class="sec-head" style="margin-bottom:14px">
+          <div>
+            <div class="sec-title">🎯 Class Performance</div>
+            <div class="sec-sub">Overall attendance health</div>
+          </div>
+        </div>
+        {rings}
+      </div>
+    </div>
+
+    <!-- Full student table -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="sec-head" style="margin-bottom:16px">
+        <div>
+          <div class="sec-title">👥 All Students — Attendance Overview</div>
+          <div class="sec-sub">Click "View →" for full individual history</div>
+        </div>
+        <a href="/students" class="btn btn-ghost btn-sm">All Profiles</a>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:14px;font-size:12px">
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:var(--green);display:inline-block"></span>≥75% Good</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:var(--amber);display:inline-block"></span>50–74% Warning</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:var(--red);display:inline-block"></span>&lt;50% At Risk</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Student</th><th>Present</th><th>Absent</th>
+              <th>Total</th><th>Rate</th><th>Trend</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody>{perf_rows or '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No students enrolled yet</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="card">
+      <div class="sec-head" style="margin-bottom:16px">
+        <div>
+          <div class="sec-title">⚡ Quick Actions</div>
+          <div class="sec-sub">Jump to any feature instantly</div>
+        </div>
+      </div>
+      {quick_actions}
+    </div>
+    """
+    return layout("Teacher Dashboard", content, "teacher")
+
+
 # ══════════════════════════════════════════════════════
 #  ADMIN
 # ══════════════════════════════════════════════════════
@@ -1866,6 +3284,8 @@ def delete():
         return layout("Cleared", content, "admin")
     except Exception as e:
         return layout("Error", f'<div class="alert alert-error">❌ {str(e)}</div>', "admin")
+
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
