@@ -1,5 +1,5 @@
 # routes.py — FaceNova All Route Handlers
-from flask import request, redirect, session, send_file
+from flask import request, redirect, session, send_file, make_response
 from datetime import datetime, timedelta
 import os, csv, base64, json
 import cv2
@@ -7,25 +7,35 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import db
+from auth import (
+    login_required, role_required, school_admin_required,
+    super_admin_required, subscription_check,
+    login_user, logout_user, current_user, current_school_id,
+    hash_password, verify_password, generate_temp_password,
+    school_data_dir, assert_same_school,
+)
 from app_core import (
-    app, DATA_DIR, GRAPH_DIR, ATT_FILE, GRAPH_DIR,
-    PLANS, DEV_CREDENTIALS, TRIAL_DAYS,
-    read_all_records, enrolled_students, stats_for_student,
-    daily_summary, enrolled_students, students_in_section,
+    app, DATA_DIR, GRAPH_DIR, PLANS, TRIAL_DAYS,
+    read_all_records, write_att_record, enrolled_students,
+    stats_for_student, daily_summary, students_in_section,
     get_student_section, set_student_section,
     get_profile_image, save_profile_image, load_meta, save_meta,
     load_sections, save_sections, section_color,
-    sub_load, sub_save, sub_status, sub_banner, premium_required,
+    sub_banner,
     face_detector, get_face_encoding, match_face,
-    layout, CSS, PLANS, pct_ring,
-    teacher_required, TEACHER_USERS,
+    layout, CSS, pct_ring,
+    att_file_for, school_data_dir,
 )
+from styles import CSS
 
 # ══════════════════════════════════════════════════════
 #  DASHBOARD
 # ══════════════════════════════════════════════════════
 
 @app.route("/")
+@login_required
+@subscription_check
 def home():
     records   = read_all_records()
     students  = enrolled_students()
@@ -154,6 +164,8 @@ def home():
 # ══════════════════════════════════════════════════════
 
 @app.route("/calendar")
+@login_required
+@subscription_check
 def calendar():
     # which month/year to show
     now = datetime.now()
@@ -294,6 +306,8 @@ def calendar():
 # ══════════════════════════════════════════════════════
 
 @app.route("/daily")
+@login_required
+@subscription_check
 def daily():
     date_str  = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
     section  = request.args.get("section","")
@@ -415,6 +429,8 @@ def daily():
 # ══════════════════════════════════════════════════════
 
 @app.route("/students")
+@login_required
+@subscription_check
 def students():
     section      = request.args.get("section","")
     sections     = load_sections()
@@ -675,6 +691,8 @@ def section_color(idx):
     return r, h
 
 @app.route("/sections")
+@login_required
+@subscription_check
 def sections_overview():
     sections = load_sections()
     records  = read_all_records()
@@ -778,6 +796,9 @@ def sections_overview():
 
 
 @app.route("/sections/manage", methods=["GET","POST"])
+@login_required
+@school_admin_required
+@subscription_check
 def sections_manage():
     sections = load_sections()
     msg = ""
@@ -885,6 +906,8 @@ def sections_manage():
 # ══════════════════════════════════════════════════════
 
 @app.route("/enroll")
+@login_required
+@subscription_check
 def enroll_page():
     sections    = load_sections()
     sec_options = "".join(f'<option value="{s}">{s}</option>' for s in sections)
@@ -934,17 +957,21 @@ def enroll_page():
     return layout("Enroll", content, "enroll")
 
 @app.route("/upload", methods=["POST"])
+@login_required
+@subscription_check
 def upload():
     try:
         name    = request.form["name"].strip()
         section = request.form.get("section","").strip()
         files   = request.files.getlist("photos")
-        os.makedirs(os.path.join(DATA_DIR, name), exist_ok=True)
+        sid       = current_school_id()
+        sdir      = school_data_dir(sid)
+        os.makedirs(os.path.join(sdir, name), exist_ok=True)
         if section:
             set_student_section(name, section)
         saved = 0
         for f in files:
-            f.save(os.path.join(DATA_DIR, name, f"{datetime.now().timestamp()}.jpg"))
+            f.save(os.path.join(sdir, name, f"{datetime.now().timestamp()}.jpg"))
             saved += 1
         sec_badge = f'<span class="sec-badge" style="margin-left:8px">{section}</span>' if section else ""
         content = f"""
@@ -971,6 +998,8 @@ def upload():
 # ══════════════════════════════════════════════════════
 
 @app.route("/scan")
+@login_required
+@subscription_check
 def scan_page():
     content = """
     <div class="sec-head" style="margin-bottom:20px">
@@ -1115,8 +1144,7 @@ def camera():
         time_str = datetime.now().strftime("%H:%M:%S")
 
         student_section = get_student_section(person) if person not in ("Unknown","No Face Detected") else ""
-        with open(ATT_FILE, "a", newline="") as f:
-            csv.writer(f).writerow([person, today, status, time_str, student_section])
+        write_att_record([person, today, status, time_str, student_section])
 
         pill_cls  = "pill-green" if status == "Present" else "pill-red"
         alert_cls = "alert-success" if status == "Present" else "alert-error"
@@ -1178,6 +1206,8 @@ def img(user, file):
 # ══════════════════════════════════════════════════════
 
 @app.route("/gallery")
+@login_required
+@subscription_check
 def gallery():
     records  = read_all_records()
     students = enrolled_students()
@@ -1644,6 +1674,8 @@ def render_heatmap(records):
 # ── MAIN ANALYTICS ROUTE ─────────────────────────────
 
 @app.route("/graph")
+@login_required
+@subscription_check
 def graph():
     records    = read_all_records()
     chart_type = request.args.get("type", "line")
@@ -1860,18 +1892,8 @@ def graph_image(filename):
 
 
 # ══════════════════════════════════════════════════════
-#  TEACHER AUTH + DASHBOARD
+#  AUTH — UNIFIED LOGIN / LOGOUT
 # ══════════════════════════════════════════════════════
-
-def teacher_required(f):
-    """Decorator: redirect to login if not authenticated."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("teacher_logged_in"):
-            return redirect("/teacher/login")
-        return f(*args, **kwargs)
-    return decorated
 
 def pct_ring(pct, size=110, stroke=10):
     """SVG donut ring showing percentage."""
@@ -1895,82 +1917,107 @@ def pct_ring(pct, size=110, stroke=10):
       </div>
     </div>"""
 
-# ── LOGIN ─────────────────────────────────────────────
+# ── UNIFIED LOGIN ─────────────────────────────────────
+# Replaces /teacher/login. Single entry point for all roles.
 
-@app.route("/teacher/login", methods=["GET","POST"])
-def teacher_login():
+@app.route("/login", methods=["GET","POST"])
+def login():
+    # already logged in
+    if session.get("user_id"):
+        return _role_home()
+
     error = ""
+    nxt   = request.args.get("next", "/")
+
     if request.method == "POST":
         username = request.form.get("username","").strip()
         password = request.form.get("password","").strip()
-        if TEACHER_USERS.get(username) == password:
-            session["teacher_logged_in"] = True
-            session["teacher_name"]      = username
-            return redirect("/teacher")
+        nxt      = request.form.get("next", "/")
+
+        user = db.user_get_by_username(username)
+        if user and verify_password(password, user["password_hash"]):
+            if not user["is_active"]:
+                error = "Your account has been deactivated. Contact your school administrator."
+            else:
+                login_user(user)
+                return redirect(nxt if nxt.startswith("/") else "/")
         else:
             error = "Invalid username or password."
 
-    error_html = f'<div class="alert alert-error">{error}</div>' if error else ""
+    err_html = f'<div class="alert alert-error" style="margin-bottom:16px">{error}</div>' if error else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Teacher Login — FaceNova</title>
+<title>Sign In — FaceNova</title>
 {CSS}
 </head>
 <body>
 <div class="login-wrap">
   <div class="login-card">
     <div class="login-logo">
-      <div class="login-logo-icon">👨‍🏫</div>
-      <div class="login-title">Teacher Portal</div>
-      <div class="login-sub">Sign in to access your class dashboard</div>
+      <div class="login-logo-icon">🧠</div>
+      <div class="login-title">FaceNova AI</div>
+      <div class="login-sub">Sign in to your account</div>
     </div>
-    {error_html}
-    <form method="POST" action="/teacher/login">
+    {err_html}
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="{nxt}">
       <div class="form-group">
         <label>Username</label>
-        <input type="text" name="username" placeholder="e.g. teacher" required autofocus>
+        <input type="text" name="username" placeholder="Your username" required autofocus>
       </div>
       <div class="form-group">
         <label>Password</label>
-        <input type="password" name="password" placeholder="••••••••" required>
+        <input type="password" name="password" placeholder="••••••••••" required>
       </div>
-      <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;font-size:15px;margin-top:6px">
+      <button type="submit" class="btn btn-primary"
+              style="width:100%;justify-content:center;padding:13px;font-size:15px;margin-top:6px">
         🔐 &nbsp;Sign In
       </button>
     </form>
-    <div style="text-align:center;margin-top:20px;font-size:12px;color:var(--muted)">
-      Default: <strong>teacher</strong> / <strong>facenova123</strong>
-    </div>
-    <div style="text-align:center;margin-top:14px">
-      <a href="/" style="color:var(--blue);font-size:13px">← Back to Main Dashboard</a>
+    <div style="text-align:center;margin-top:18px;font-size:12px;color:var(--muted)">
+      Contact your School Administrator for account access.
     </div>
   </div>
 </div>
-
-{_exp_popup}
 </body></html>"""
     return html
 
+# Keep /teacher/login as alias for backward compatibility
+@app.route("/teacher/login")
+def teacher_login_redirect():
+    return redirect("/login")
+
+@app.route("/logout")
 @app.route("/teacher/logout")
-def teacher_logout():
-    session.clear()
-    return redirect("/teacher/login")
+def logout():
+    logout_user()
+    return redirect("/login")
+
+def _role_home():
+    """Redirect user to their home page based on role."""
+    role = session.get("role","")
+    if role == "SUPER_ADMIN":
+        return redirect("/superadmin")
+    if role == "SCHOOL_ADMIN":
+        return redirect("/teacher")
+    return redirect("/")
 
 # ── MAIN TEACHER DASHBOARD ────────────────────────────
 
 @app.route("/teacher")
-@teacher_required
+@login_required
+@role_required("TEACHER","SCHOOL_ADMIN","SUPER_ADMIN")
 def teacher_dashboard():
     section   = request.args.get("section","")
     sections  = load_sections()
     records   = read_all_records(section)
     students  = enrolled_students(section)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    teacher   = session.get("teacher_name", "Teacher")
+    teacher   = session.get("full_name", session.get("username","Teacher"))
 
     present_today, absent_today = daily_summary(today_str, records)
     total_students = len(students)
@@ -2226,6 +2273,8 @@ def teacher_dashboard():
 # ══════════════════════════════════════════════════════
 
 @app.route("/admin")
+@login_required
+@school_admin_required
 def admin():
     records = read_all_records()
     rows = "".join(f"""<tr>
@@ -2276,80 +2325,78 @@ def delete():
 
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 # ══════════════════════════════════════════════════════
-#  SUBSCRIPTION ROUTES
+#  SUBSCRIPTION ROUTES (db-backed, per-school)
 # ══════════════════════════════════════════════════════
 
 @app.route("/upgrade")
+@login_required
 def upgrade_page():
-    s       = sub_status()
-    rec     = s["rec"]
-    locked  = request.args.get("locked", "")
+    sid  = current_school_id()
+    sub  = db.sub_get(sid) if sid else None
+    role = session.get("role","")
+    locked = request.args.get("locked","")
 
     locked_banner = ""
     if locked:
-        locked_banner = """<div class="alert alert-warn" style="margin-bottom:20px">
-          🔒 <strong>Premium Feature</strong> — This feature requires an active subscription.
-          Upgrade below to unlock all features.
-        </div>"""
+        locked_banner = '<div class="alert alert-warn" style="margin-bottom:20px">🔒 <strong>Premium Feature</strong> — Upgrade to access this feature.</div>'
 
+    # Status card
     status_card = ""
-    if s["is_trial"]:
-        status_card = f"""<div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);
-          border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
-          <span style="font-size:28px">🎉</span>
-          <div>
-            <div style="font-weight:700;color:var(--blue);margin-bottom:2px">Free Trial Active</div>
-            <div style="font-size:13px;color:var(--text2)">{s['days_left']} day{"s" if s['days_left']!=1 else ""} remaining
-            · Trial started {rec.get('trial_start','—')} · Ends {rec.get('trial_end','—')}</div>
-          </div>
-        </div>"""
-    elif s["is_premium"]:
-        status_card = f"""<div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);
-          border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
-          <span style="font-size:28px">✅</span>
-          <div>
-            <div style="font-weight:700;color:var(--green-l);margin-bottom:2px">Premium Active — {rec.get('plan','').title()} Plan</div>
-            <div style="font-size:13px;color:var(--text2)">Valid until {rec.get('premium_end','—')}</div>
-          </div>
-        </div>"""
-    elif s["is_expired"]:
-        status_card = """<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
-          border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
-          <span style="font-size:28px">🔒</span>
-          <div>
-            <div style="font-weight:700;color:var(--red-l);margin-bottom:2px">Free Trial Expired</div>
-            <div style="font-size:13px;color:var(--text2)">Choose a plan below to restore access. Your data is safe.</div>
-          </div>
-        </div>"""
+    if sub:
+        if sub["is_trial"]:
+            status_card = f"""<div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
+              <span style="font-size:28px">🎉</span>
+              <div>
+                <div style="font-weight:700;color:var(--blue)">Free Trial Active — {sub['days_left']} day{"s" if sub['days_left']!=1 else ""} remaining</div>
+                <div style="font-size:13px;color:var(--text2)">Trial started {sub.get('trial_start','—')} · Ends {sub.get('trial_end','—')}</div>
+              </div>
+            </div>"""
+        elif sub["is_active"]:
+            status_card = f"""<div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
+              <span style="font-size:28px">✅</span>
+              <div>
+                <div style="font-weight:700;color:var(--green-l)">{sub['plan_name'].replace('_',' ').title()} Active</div>
+                <div style="font-size:13px;color:var(--text2)">Valid until {sub.get('subscription_end','—')}</div>
+              </div>
+            </div>"""
+        elif sub["is_expired"]:
+            status_card = """<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:14px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px">
+              <span style="font-size:28px">🔒</span>
+              <div>
+                <div style="font-weight:700;color:var(--red-l)">Subscription Expired</div>
+                <div style="font-size:13px;color:var(--text2)">Your data is safe. Choose a plan below to restore access.</div>
+              </div>
+            </div>"""
+
+    # Plan definitions
+    plan_meta = [
+        ("FREE_TRIAL",    "🆓", "var(--muted)",   "",             30,  ["Basic face attendance","Up to 50 students","2 teachers","Basic dashboard"]),
+        ("BASIC",         "💙", "var(--blue)",     "",             180, ["Everything in Free Trial","Up to 200 students","5 teachers","Reports","CSV export","Sections"]),
+        ("PROFESSIONAL",  "💜", "var(--purple)",   "Most Popular", 365, ["Everything in Basic","Up to 1,000 students","20 teachers","Advanced analytics","Priority support"]),
+        ("ENTERPRISE",    "🌟", "var(--amber)",    "Best Value",   1825,["Everything in Professional","Unlimited students & teachers","API access","Custom branding","Phone support"]),
+    ]
 
     plan_cards = ""
-    plan_meta = [
-        ("monthly", "💙", "var(--blue)",   "",          ["Face recognition scanning","Up to 500 students","All analytics & reports","Calendar & daily logs","Teacher dashboard","Multi-class sections","CSV export","Email support"]),
-        ("yearly",  "💜", "var(--purple)", "Most Popular",["Everything in Monthly","Save ₹889 vs monthly","Priority support","Advanced analytics","Student profile photos","Sections management","Up to 2000 students","Dedicated account manager"]),
-        ("5year",   "🌟", "var(--amber)",  "Best Value",  ["Everything in Yearly","Save ₹5,457 vs monthly","Lifetime-like pricing","Up to 10,000 students","White-label option","Custom school branding","API access","Phone support"]),
-    ]
-    for key, icon, color, badge, features in plan_meta:
-        p = PLANS[key]
+    for key, icon, color, badge, days, features in plan_meta:
         badge_html = f'<div class="plan-badge">{badge}</div>' if badge else ""
         popular    = "plan-popular" if badge == "Most Popular" else ""
         feat_html  = "".join(f"<li>{f}</li>" for f in features)
         plan_cards += f"""
-        <div class="plan-card plan-{key} {popular}">
+        <div class="plan-card {popular}" style="border-top:2px solid {color}">
           {badge_html}
           <div class="plan-icon">{icon}</div>
-          <div class="plan-name">{p['name']}</div>
-          <div class="plan-price" style="color:{color}">{p['label'].split('/')[0].strip()}</div>
-          <div class="plan-period">per {p['label'].split('/')[1].strip()}</div>
+          <div class="plan-name" style="color:{color}">{key.replace('_',' ').title()}</div>
           <ul class="plan-features">{feat_html}</ul>
           <form method="POST" action="/upgrade/activate">
             <input type="hidden" name="plan" value="{key}">
-            <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;font-size:14px">
-              🚀 Get {p['name']}
+            <input type="hidden" name="days" value="{days}">
+            <button type="submit" class="btn btn-primary"
+                    style="width:100%;justify-content:center;padding:13px;font-size:14px">
+              🚀 Activate (Mock)
             </button>
           </form>
         </div>"""
@@ -2357,332 +2404,667 @@ def upgrade_page():
     content = f"""
     {locked_banner}
     <div class="upgrade-hero">
-      <div style="display:inline-flex;align-items:center;gap:8px;background:rgba(139,92,246,0.15);
-        border:1px solid rgba(139,92,246,0.3);border-radius:20px;padding:5px 16px;
-        font-size:12px;font-weight:700;color:var(--purple-l);margin-bottom:16px;position:relative;z-index:1">
-        ⭐ FaceNova Premium
-      </div>
-      <h1>Upgrade Your School's<br>Attendance System</h1>
-      <p style="max-width:500px;margin:0 auto">
-        Unlock unlimited students, advanced AI analytics, multi-class management,
-        and priority support. Choose the plan that fits your school.
-      </p>
+      <h1>FaceNova Premium</h1>
+      <p>Unlock unlimited students, advanced analytics, multi-teacher management, and priority support.</p>
     </div>
-
     {status_card}
-
-    <div class="plan-grid">{plan_cards}</div>
-
-    <div class="card" style="margin-top:10px">
-      <div class="sec-head" style="margin-bottom:16px">
-        <div><div class="sec-title">🤝 All Plans Include</div></div>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">
-        {"".join(f'<div style="display:flex;align-items:center;gap:10px;font-size:13.5px"><span style="color:var(--green);font-weight:700;font-size:15px">✓</span>{f}</div>'
-          for f in ["AI Face Recognition","Attendance Calendar","Daily & Monthly Reports",
-                    "Student Profiles","Section Management","Data Export (CSV)",
-                    "Teacher Dashboard","Secure Data Storage","Regular Updates","Mobile Friendly"])}
-      </div>
+    <div class="alert alert-info" style="margin-bottom:20px">
+      ⚠️ <strong>Demo Mode:</strong> No real payment is processed. Plans activate instantly for testing.
     </div>
-
-    <div style="text-align:center;margin-top:20px;color:var(--muted);font-size:12.5px">
-      🔒 Secure Payment &nbsp;·&nbsp; All data safe on expiry &nbsp;·&nbsp;
-      Cancel anytime &nbsp;·&nbsp;
-      <a href="/dev/login" style="color:var(--muted)">Admin</a>
-    </div>
+    <div class="plan-grid" style="grid-template-columns:repeat(4,1fr)">{plan_cards}</div>
     """
-    return layout("⭐ Premium Plans", content, "upgrade")
+    return layout("⭐ Subscription Plans", content, "upgrade")
 
 
 @app.route("/upgrade/activate", methods=["POST"])
+@login_required
+@role_required("SCHOOL_ADMIN","SUPER_ADMIN")
 def upgrade_activate():
-    plan_key = request.form.get("plan","")
-    if plan_key not in PLANS:
-        return redirect("/upgrade")
-    p   = PLANS[plan_key]
-    now = datetime.now()
-    end = now + timedelta(days=p["period"])
-    rec = sub_load()
-    rec["status"]         = "active"
-    rec["plan"]           = plan_key
-    rec["premium_start"]  = now.strftime("%Y-%m-%d")
-    rec["premium_end"]    = end.strftime("%Y-%m-%d")
-    rec["payment_status"] = "paid"
-    rec["history"].append({
-        "event":  "activated",
-        "plan":   plan_key,
-        "date":   now.strftime("%Y-%m-%d %H:%M:%S"),
-        "end":    end.strftime("%Y-%m-%d"),
-    })
-    sub_save(rec)
+    sid      = current_school_id()
+    plan_key = request.form.get("plan","BASIC")
+    days     = int(request.form.get("days","365"))
+    if sid:
+        db.sub_activate(sid, plan_key, days)
+    return redirect("/upgrade")
+
+
+@app.route("/school/subscription")
+@login_required
+@school_admin_required
+def school_subscription():
+    sid  = current_school_id()
+    sub  = db.sub_get(sid)
+    hist = db.sub_history_get(sid)
+    feat = sub["features"] if sub else {}
+
+    hist_rows = "".join(f"""<tr>
+      <td>{h['created_at'][:16]}</td>
+      <td style="font-weight:600">{h['event']}</td>
+      <td>{(h.get('plan_name') or '—').replace('_',' ').title()}</td>
+      <td style="color:var(--text2)">{h.get('note','')}</td>
+    </tr>""" for h in hist) or '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No history</td></tr>'
+
+    feat_rows = "".join(f"""<tr>
+      <td>{k.replace('_',' ').title()}</td>
+      <td>{"✅" if v is True else ("❌" if v is False else f"<strong>{v}</strong>")}</td>
+    </tr>""" for k,v in feat.items() if k != "label")
 
     content = f"""
-    <div style="text-align:center;padding:60px 20px">
-      <div style="font-size:72px;margin-bottom:20px">🎉</div>
-      <div class="sec-title" style="font-size:26px;margin-bottom:10px">Welcome to Premium!</div>
-      <div style="color:var(--text2);font-size:15px;margin-bottom:6px">
-        <strong style="color:var(--green-l)">{p['name']}</strong> activated successfully
+    <div class="sec-head" style="margin-bottom:20px">
+      <div><div class="sec-title" style="font-size:20px">📋 Subscription Details</div></div>
+      <a href="/upgrade" class="btn btn-primary">Manage Plans</a>
+    </div>
+    <div class="grid-2" style="align-items:start;margin-bottom:20px">
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">Current Status</div>
+        <table style="font-size:13.5px"><tbody>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none;width:140px">Status</td>
+              <td style="border:none"><span class="pill {'pill-green' if sub and sub['is_active'] else ('pill-blue' if sub and sub['is_trial'] else 'pill-red')}">{sub['status'] if sub else '—'}</span></td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Plan</td>
+              <td style="border:none;font-weight:600">{(sub.get('plan_name') or '—').replace('_',' ').title() if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Trial Start</td>
+              <td style="border:none">{sub.get('trial_start','—') if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Trial End</td>
+              <td style="border:none">{sub.get('trial_end','—') if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Sub Start</td>
+              <td style="border:none">{sub.get('subscription_start','—') if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Sub End</td>
+              <td style="border:none">{sub.get('subscription_end','—') if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Max Students</td>
+              <td style="border:none;font-weight:600">{feat.get('max_students','—')}</td></tr>
+          <tr><td style="color:var(--muted);padding:8px 0;border:none">Max Teachers</td>
+              <td style="border:none;font-weight:600">{feat.get('max_teachers','—')}</td></tr>
+        </tbody></table>
       </div>
-      <div style="color:var(--muted);font-size:13px;margin-bottom:28px">
-        Valid until <strong>{end.strftime('%d %B %Y')}</strong>
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">Plan Features</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Feature</th><th>Status</th></tr></thead>
+          <tbody>{feat_rows}</tbody>
+        </table></div>
       </div>
-      <div style="display:flex;gap:12px;justify-content:center">
-        <a href="/" class="btn btn-primary">🏠 Go to Dashboard</a>
-        <a href="/students" class="btn btn-ghost">👥 Students</a>
-      </div>
+    </div>
+    <div class="card">
+      <div class="sec-title" style="margin-bottom:14px">Subscription History</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Date</th><th>Event</th><th>Plan</th><th>Note</th></tr></thead>
+        <tbody>{hist_rows}</tbody>
+      </table></div>
     </div>"""
-    return layout("Premium Activated!", content, "upgrade")
+    return layout("Subscription", content, "upgrade")
 
 
 # ══════════════════════════════════════════════════════
-#  DEVELOPER PANEL
+#  TEACHER MANAGEMENT (SCHOOL_ADMIN)
 # ══════════════════════════════════════════════════════
 
-@app.route("/dev/login", methods=["GET","POST"])
-def dev_login():
-    error = ""
-    if request.method == "POST":
-        u = request.form.get("username","").strip()
-        p = request.form.get("password","").strip()
-        if DEV_CREDENTIALS.get(u) == p:
-            session["dev_logged_in"] = True
-            session["dev_user"]      = u
-            return redirect("/dev")
-        error = "Invalid developer credentials."
-
-    err_html = f'<div class="alert alert-error">{error}</div>' if error else ""
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Developer Login — FaceNova</title>
-{CSS}
-</head>
-<body>
-<div class="login-wrap">
-  <div class="login-card">
-    <div class="login-logo">
-      <div class="login-logo-icon" style="background:linear-gradient(135deg,#7c3aed,#2563eb)">👑</div>
-      <div class="login-title">Developer Portal</div>
-      <div class="login-sub">Restricted access · FaceNova Admin</div>
-    </div>
-    {err_html}
-    <form method="POST">
-      <div class="form-group">
-        <label>Username</label>
-        <input type="text" name="username" placeholder="Developer username" required autofocus>
-      </div>
-      <div class="form-group">
-        <label>Password</label>
-        <input type="password" name="password" placeholder="••••••••••••" required>
-      </div>
-      <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px">
-        👑 Developer Sign In
-      </button>
-    </form>
-    <div style="text-align:center;margin-top:18px">
-      <a href="/" style="color:var(--muted);font-size:12.5px">← Back to App</a>
-    </div>
-  </div>
-</div>
-</body></html>"""
-    return html
-
-
-@app.route("/dev/logout")
-def dev_logout():
-    session.pop("dev_logged_in", None)
-    session.pop("dev_user", None)
-    return redirect("/")
-
-
-@app.route("/dev")
-def dev_panel():
-    if not session.get("dev_logged_in"):
-        return redirect("/dev/login")
-
-    rec      = sub_load()
-    students = enrolled_students()
-    records  = read_all_records()
+@app.route("/manage/teachers")
+@login_required
+@school_admin_required
+def manage_teachers():
+    sid      = current_school_id()
+    teachers = db.users_by_school(sid, role="TEACHER")
     sections = load_sections()
 
-    # subscription history
-    hist_rows = ""
-    for h in reversed(rec.get("history", [])):
-        hist_rows += f"""<tr>
-          <td>{h.get('date','—')}</td>
-          <td style="font-weight:600">{h.get('event','—').upper()}</td>
-          <td><span class="pill pill-blue">{PLANS.get(h.get('plan',''),{}).get('name', h.get('plan','—'))}</span></td>
-          <td>{h.get('end','—')}</td>
+    rows = ""
+    for t in teachers:
+        secs = json.loads(t.get("assigned_sections","[]") or "[]")
+        status_pill = '<span class="pill pill-green">Active</span>' if t["is_active"] else '<span class="pill pill-red">Inactive</span>'
+        rows += f"""<tr>
+          <td><strong>{t['full_name'] or t['username']}</strong><br>
+              <span style="font-size:11px;color:var(--muted)">{t['teacher_id'] or '—'}</span></td>
+          <td>{t['username']}</td>
+          <td>{t['email'] or '—'}</td>
+          <td>{', '.join(secs) if secs else '—'}</td>
+          <td>{status_pill}</td>
+          <td>{t.get('last_login','—') or '—'}</td>
+          <td>
+            <a href="/manage/teachers/{t['id']}/edit" class="btn btn-ghost btn-xs">Edit</a>
+            <a href="/manage/teachers/{t['id']}/toggle"
+               class="btn {'btn-red' if t['is_active'] else 'btn-green'} btn-xs"
+               onclick="return confirm('{"Deactivate" if t["is_active"] else "Activate"} this teacher?')">
+               {"Deactivate" if t['is_active'] else "Activate"}
+            </a>
+          </td>
         </tr>"""
 
-    # quick actions
-    now = datetime.now()
+    content = f"""
+    <div class="sec-head" style="margin-bottom:20px">
+      <div><div class="sec-title" style="font-size:20px">👨‍🏫 Teacher Management</div>
+      <div class="sec-sub">Create and manage teacher accounts for your school</div></div>
+      <a href="/manage/teachers/new" class="btn btn-primary">+ Add Teacher</a>
+    </div>
+    <div class="card">
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Sections</th><th>Status</th><th>Last Login</th><th>Actions</th></tr></thead>
+        <tbody>{rows or '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No teachers yet — add your first teacher above.</td></tr>'}</tbody>
+      </table></div>
+    </div>"""
+    return layout("Teachers", content, "admin")
+
+
+@app.route("/manage/teachers/new", methods=["GET","POST"])
+@login_required
+@school_admin_required
+def teacher_new():
+    sid      = current_school_id()
+    sections = load_sections()
+    msg      = ""
+
+    if request.method == "POST":
+        full_name  = request.form.get("full_name","").strip()
+        username   = request.form.get("username","").strip()
+        email      = request.form.get("email","").strip()
+        teacher_id = request.form.get("teacher_id","").strip()
+        password   = request.form.get("password","").strip()
+        sel_secs   = request.form.getlist("sections")
+
+        if not all([full_name, username, password]):
+            msg = '<div class="alert alert-error">Full name, username and password are required.</div>'
+        else:
+            ok, err = db.user_create(
+                school_id=sid, role="TEACHER",
+                username=username, password_hash=hash_password(password),
+                full_name=full_name, email=email, teacher_id=teacher_id,
+                sections=sel_secs,
+            )
+            if ok:
+                return redirect("/manage/teachers?created=1")
+            else:
+                msg = f'<div class="alert alert-error">❌ {err} — username may already exist.</div>'
+
+    sec_checkboxes = "".join(f"""
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer">
+      <input type="checkbox" name="sections" value="{s}"
+             style="width:16px;height:16px;accent-color:var(--blue)">
+      <span style="font-size:13.5px">{s}</span>
+    </label>""" for s in sections)
+
+    created = '<div class="alert alert-success" style="margin-bottom:16px">✅ Teacher created successfully.</div>' if request.args.get("created") else ""
 
     content = f"""
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:22px">
-      <div>
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;margin-bottom:4px">
-          👑 Developer Panel
-        </div>
-        <div style="color:var(--text2);font-size:13px">Logged in as <strong>{session.get('dev_user')}</strong> · Lifetime Premium</div>
-      </div>
-      <a href="/dev/logout" class="btn btn-ghost btn-sm">Sign Out</a>
+    <div style="margin-bottom:16px">
+      <a href="/manage/teachers" class="btn btn-ghost btn-sm">← Back to Teachers</a>
     </div>
+    {created}
+    <div class="grid-2" style="align-items:start">
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:18px">➕ Add New Teacher</div>
+        {msg}
+        <form method="POST">
+          <div class="form-group">
+            <label>Full Name *</label>
+            <input type="text" name="full_name" placeholder="e.g. Mrs. Priya Sharma" required>
+          </div>
+          <div class="form-group">
+            <label>Username * (used to log in)</label>
+            <input type="text" name="username" placeholder="e.g. priya.sharma" required>
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="text" name="email" placeholder="teacher@school.edu">
+          </div>
+          <div class="form-group">
+            <label>Teacher ID</label>
+            <input type="text" name="teacher_id" placeholder="e.g. TCH-001">
+          </div>
+          <div class="form-group">
+            <label>Password * (share this with the teacher)</label>
+            <input type="password" name="password" placeholder="Min 8 characters" required>
+          </div>
+          <div class="form-group">
+            <label>Assign to Sections</label>
+            <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:9px;padding:12px">
+              {sec_checkboxes or '<span style="color:var(--muted);font-size:13px">No sections configured. <a href="/sections/manage" style="color:var(--blue)">Add sections first</a></span>'}
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px">
+            ✅ Create Teacher Account
+          </button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">📋 Instructions</div>
+        <div style="display:flex;flex-direction:column;gap:14px;font-size:13.5px">
+          <div style="display:flex;gap:10px"><div style="background:rgba(59,130,246,0.15);color:var(--blue);border-radius:8px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">1</div>
+            <div><strong>Choose a unique username</strong><br><span style="color:var(--text2)">Teachers log in using this — cannot be changed later</span></div></div>
+          <div style="display:flex;gap:10px"><div style="background:rgba(6,182,212,0.15);color:var(--cyan);border-radius:8px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">2</div>
+            <div><strong>Set a strong password</strong><br><span style="color:var(--text2)">Share it securely — password is hashed and never visible again</span></div></div>
+          <div style="display:flex;gap:10px"><div style="background:rgba(16,185,129,0.15);color:var(--green);border-radius:8px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">3</div>
+            <div><strong>Assign sections</strong><br><span style="color:var(--text2)">Teachers only see students in their assigned sections</span></div></div>
+        </div>
+        <div class="alert alert-warn" style="margin-top:20px;font-size:12.5px">
+          ⚠️ Passwords are hashed with PBKDF2-SHA256. You cannot retrieve it after creation. Use "Reset Password" if needed.
+        </div>
+      </div>
+    </div>"""
+    return layout("Add Teacher", content, "admin")
 
-    <!-- KPI row -->
+
+@app.route("/manage/teachers/<int:tid>/edit", methods=["GET","POST"])
+@login_required
+@school_admin_required
+def teacher_edit(tid):
+    sid     = current_school_id()
+    teacher = db.user_get_by_id(tid)
+    if not teacher or teacher["school_id"] != sid or teacher["role"] != "TEACHER":
+        return redirect("/manage/teachers")
+
+    sections = load_sections()
+    msg      = ""
+    assigned = json.loads(teacher.get("assigned_sections","[]") or "[]")
+
+    if request.method == "POST":
+        action = request.form.get("action","update")
+
+        if action == "update":
+            full_name  = request.form.get("full_name","").strip()
+            email      = request.form.get("email","").strip()
+            teacher_id = request.form.get("teacher_id","").strip()
+            sel_secs   = request.form.getlist("sections")
+            import json as _json
+            db.user_update(tid, full_name=full_name, email=email,
+                           teacher_id=teacher_id,
+                           assigned_sections=_json.dumps(sel_secs))
+            msg = '<div class="alert alert-success">✅ Teacher updated successfully.</div>'
+            teacher  = db.user_get_by_id(tid)
+            assigned = _json.loads(teacher.get("assigned_sections","[]") or "[]")
+
+        elif action == "reset_password":
+            new_pass = generate_temp_password()
+            db.user_update(tid, password_hash=hash_password(new_pass))
+            msg = f'<div class="alert alert-success">✅ Password reset. New temporary password: <strong style="font-family:monospace;font-size:15px;color:var(--amber-l)">{new_pass}</strong><br><span style="font-size:12px">Share this with the teacher and ask them to remember it. It will not be shown again.</span></div>'
+
+    sec_checkboxes = "".join(f"""
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer">
+      <input type="checkbox" name="sections" value="{s}"
+             {"checked" if s in assigned else ""}
+             style="width:16px;height:16px;accent-color:var(--blue)">
+      <span style="font-size:13.5px">{s}</span>
+    </label>""" for s in sections)
+
+    content = f"""
+    <div style="margin-bottom:16px">
+      <a href="/manage/teachers" class="btn btn-ghost btn-sm">← Back to Teachers</a>
+    </div>
+    {msg}
+    <div class="grid-2" style="align-items:start">
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:18px">✏️ Edit Teacher — {teacher['full_name'] or teacher['username']}</div>
+        <form method="POST">
+          <input type="hidden" name="action" value="update">
+          <div class="form-group">
+            <label>Username (cannot change)</label>
+            <input type="text" value="{teacher['username']}" disabled style="opacity:0.5">
+          </div>
+          <div class="form-group">
+            <label>Full Name</label>
+            <input type="text" name="full_name" value="{teacher['full_name'] or ''}" required>
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="text" name="email" value="{teacher['email'] or ''}">
+          </div>
+          <div class="form-group">
+            <label>Teacher ID</label>
+            <input type="text" name="teacher_id" value="{teacher['teacher_id'] or ''}">
+          </div>
+          <div class="form-group">
+            <label>Assigned Sections</label>
+            <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:9px;padding:12px">
+              {sec_checkboxes or '<span style="color:var(--muted);font-size:13px">No sections configured.</span>'}
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:12px">
+            💾 Save Changes
+          </button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">🔐 Reset Password</div>
+        <div style="color:var(--text2);font-size:13.5px;margin-bottom:16px">
+          Generate a new temporary password for this teacher. The password is shown once — save it before leaving this page.
+        </div>
+        <form method="POST" onsubmit="return confirm('Reset password for {teacher['full_name'] or teacher['username']}?')">
+          <input type="hidden" name="action" value="reset_password">
+          <button type="submit" class="btn btn-ghost" style="width:100%;justify-content:center">
+            🔄 Generate Temp Password
+          </button>
+        </form>
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:10px">ACCOUNT INFO</div>
+          <div style="font-size:13px;color:var(--text2)">
+            Status: <strong>{"Active" if teacher["is_active"] else "Inactive"}</strong><br>
+            Created: <strong>{(teacher.get("created_at") or "—")[:10]}</strong><br>
+            Last Login: <strong>{(teacher.get("last_login") or "Never")[:16]}</strong>
+          </div>
+        </div>
+      </div>
+    </div>"""
+    return layout(f"Edit Teacher", content, "admin")
+
+
+@app.route("/manage/teachers/<int:tid>/toggle")
+@login_required
+@school_admin_required
+def teacher_toggle(tid):
+    sid     = current_school_id()
+    teacher = db.user_get_by_id(tid)
+    if teacher and teacher["school_id"] == sid and teacher["role"] == "TEACHER":
+        new_status = 0 if teacher["is_active"] else 1
+        db.user_update(tid, is_active=new_status)
+    return redirect("/manage/teachers")
+
+
+# ══════════════════════════════════════════════════════
+#  SUPER ADMIN PANEL
+# ══════════════════════════════════════════════════════
+
+@app.route("/superadmin")
+@super_admin_required
+def superadmin_panel():
+    schools = db.school_list()
+    # count users per school
+    school_rows = ""
+    for s in schools:
+        sub  = db.sub_get(s["id"])
+        teachers = db.users_by_school(s["id"], "TEACHER")
+        admins   = db.users_by_school(s["id"], "SCHOOL_ADMIN")
+        stat     = sub["status"] if sub else "—"
+        pill     = "pill-green" if stat=="ACTIVE" else ("pill-blue" if stat=="TRIAL" else "pill-red")
+        school_rows += f"""<tr>
+          <td><strong>{s['name']}</strong><br>
+              <span style="font-size:11px;color:var(--muted)">{s['id']}</span></td>
+          <td>{s['email'] or '—'}</td>
+          <td>{len(admins)}</td>
+          <td>{len(teachers)}</td>
+          <td><span class="pill {pill}">{stat}</span></td>
+          <td>{sub.get('plan_name','—').replace('_',' ').title() if sub else '—'}</td>
+          <td>
+            <a href="/superadmin/school/{s['id']}" class="btn btn-ghost btn-xs">Manage</a>
+          </td>
+        </tr>"""
+
+    content = f"""
+    <div class="td-hero">
+      <h1>👑 Super Admin Panel</h1>
+      <p>FaceNova SaaS Platform Management · {len(schools)} school{"s" if len(schools)!=1 else ""} registered</p>
+    </div>
     <div class="stats-row" style="margin-bottom:22px">
       <div class="stat s-blue">
-        <div class="stat-ico" style="background:rgba(59,130,246,0.15)">👥</div>
-        <div class="stat-val">{len(students)}</div>
-        <div class="stat-lbl">Total Students</div>
+        <div class="stat-ico" style="background:rgba(59,130,246,0.15)">🏫</div>
+        <div class="stat-val">{len(schools)}</div>
+        <div class="stat-lbl">Schools</div>
       </div>
       <div class="stat s-green">
-        <div class="stat-ico" style="background:rgba(16,185,129,0.15)">📋</div>
-        <div class="stat-val">{len(records)}</div>
-        <div class="stat-lbl">Attendance Records</div>
-      </div>
-      <div class="stat s-purple" style="border-top:2px solid var(--purple)">
-        <div class="stat-ico" style="background:rgba(139,92,246,0.15)">📚</div>
-        <div class="stat-val">{len(sections)}</div>
-        <div class="stat-lbl">Sections</div>
+        <div class="stat-ico" style="background:rgba(16,185,129,0.15)">✅</div>
+        <div class="stat-val">{sum(1 for s in schools if db.sub_get(s['id']) and db.sub_get(s['id'])['is_active'])}</div>
+        <div class="stat-lbl">Active Plans</div>
       </div>
       <div class="stat s-amber">
-        <div class="stat-ico" style="background:rgba(245,158,11,0.15)">⭐</div>
-        <div class="stat-val">{rec.get('status','—').upper()}</div>
-        <div class="stat-lbl">Sub Status</div>
+        <div class="stat-ico" style="background:rgba(245,158,11,0.15)">🎉</div>
+        <div class="stat-val">{sum(1 for s in schools if db.sub_get(s['id']) and db.sub_get(s['id'])['is_trial'])}</div>
+        <div class="stat-lbl">On Trial</div>
+      </div>
+      <div class="stat s-red">
+        <div class="stat-ico" style="background:rgba(239,68,68,0.15)">⚠️</div>
+        <div class="stat-val">{sum(1 for s in schools if db.sub_get(s['id']) and db.sub_get(s['id'])['is_expired'])}</div>
+        <div class="stat-lbl">Expired</div>
       </div>
     </div>
+    <div class="card" style="margin-bottom:20px">
+      <div class="sec-head" style="margin-bottom:16px">
+        <div class="sec-title">🏫 All Schools</div>
+        <a href="/superadmin/school/new" class="btn btn-primary">+ Register School</a>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>School</th><th>Email</th><th>Admins</th><th>Teachers</th><th>Sub Status</th><th>Plan</th><th></th></tr></thead>
+        <tbody>{school_rows or '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No schools registered yet.</td></tr>'}</tbody>
+      </table></div>
+    </div>"""
+    return layout("Super Admin", content, "admin")
 
+
+@app.route("/superadmin/school/new", methods=["GET","POST"])
+@super_admin_required
+def superadmin_school_new():
+    msg = ""
+    if request.method == "POST":
+        school_id   = request.form.get("school_id","").strip().lower().replace(" ","-")
+        school_name = request.form.get("school_name","").strip()
+        admin_user  = request.form.get("admin_username","").strip()
+        admin_pass  = request.form.get("admin_password","").strip()
+        email       = request.form.get("email","").strip()
+
+        if not all([school_id, school_name, admin_user, admin_pass]):
+            msg = '<div class="alert alert-error">All fields are required.</div>'
+        else:
+            ok, err = db.school_create(school_id, school_name, email=email)
+            if not ok:
+                msg = f'<div class="alert alert-error">❌ {err}</div>'
+            else:
+                ok2, err2 = db.user_create(
+                    school_id=school_id, role="SCHOOL_ADMIN",
+                    username=admin_user,
+                    password_hash=hash_password(admin_pass),
+                    full_name=f"{school_name} Administrator",
+                    email=email,
+                )
+                if ok2:
+                    return redirect(f"/superadmin/school/{school_id}?created=1")
+                else:
+                    msg = f'<div class="alert alert-error">School created but admin creation failed: {err2}</div>'
+
+    content = f"""
+    <div style="margin-bottom:16px">
+      <a href="/superadmin" class="btn btn-ghost btn-sm">← Back to Admin Panel</a>
+    </div>
+    {msg}
     <div class="grid-2" style="align-items:start">
-
-      <!-- Subscription control -->
       <div class="card">
-        <div class="sec-title" style="margin-bottom:16px">⚙️ Subscription Control</div>
-
-        <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div><span style="color:var(--muted)">Status:</span> <strong>{rec.get('status','—').upper()}</strong></div>
-            <div><span style="color:var(--muted)">Plan:</span> <strong>{PLANS.get(rec.get('plan',''),{{}}).get('name','—')}</strong></div>
-            <div><span style="color:var(--muted)">Trial Start:</span> <strong>{rec.get('trial_start','—')}</strong></div>
-            <div><span style="color:var(--muted)">Trial End:</span> <strong>{rec.get('trial_end','—')}</strong></div>
-            <div><span style="color:var(--muted)">Premium Start:</span> <strong>{rec.get('premium_start','—')}</strong></div>
-            <div><span style="color:var(--muted)">Premium End:</span> <strong>{rec.get('premium_end','—')}</strong></div>
-          </div>
-        </div>
-
-        <!-- Activate Premium -->
-        <form method="POST" action="/dev/action" style="margin-bottom:10px">
-          <input type="hidden" name="action" value="activate_premium">
+        <div class="sec-title" style="margin-bottom:18px">🏫 Register New School</div>
+        <form method="POST">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;margin-bottom:12px">SCHOOL INFO</div>
           <div class="form-group">
-            <label>Activate Premium Plan</label>
-            <select name="plan">
-              {"".join(f'<option value="{k}">{v["name"]} — {v["label"]}</option>' for k,v in PLANS.items())}
-            </select>
+            <label>School ID (unique slug) *</label>
+            <input type="text" name="school_id" placeholder="e.g. delhi-public-school" required>
           </div>
-          <button type="submit" class="btn btn-green" style="width:100%;justify-content:center">
-            ✅ Activate Premium
-          </button>
-        </form>
-
-        <!-- Extend Trial -->
-        <form method="POST" action="/dev/action" style="margin-bottom:10px">
-          <input type="hidden" name="action" value="extend_trial">
           <div class="form-group">
-            <label>Extend Trial by Days</label>
-            <input type="text" name="days" value="10" placeholder="Number of days">
+            <label>School Name *</label>
+            <input type="text" name="school_name" placeholder="e.g. Delhi Public School" required>
           </div>
-          <button type="submit" class="btn btn-cyan" style="width:100%;justify-content:center">
-            📅 Extend Trial
-          </button>
-        </form>
-
-        <!-- Reset to Trial -->
-        <form method="POST" action="/dev/action"
-              onsubmit="return confirm('Reset subscription to fresh trial?')">
-          <input type="hidden" name="action" value="reset_trial">
-          <button type="submit" class="btn btn-ghost" style="width:100%;justify-content:center">
-            🔄 Reset to Fresh Trial
+          <div class="form-group">
+            <label>Email</label>
+            <input type="text" name="email" placeholder="admin@school.edu">
+          </div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;margin:16px 0 12px;padding-top:16px;border-top:1px solid var(--border)">SCHOOL ADMIN ACCOUNT</div>
+          <div class="form-group">
+            <label>Admin Username *</label>
+            <input type="text" name="admin_username" placeholder="e.g. dps.admin" required>
+          </div>
+          <div class="form-group">
+            <label>Admin Password *</label>
+            <input type="password" name="admin_password" placeholder="Strong password" required>
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:13px">
+            🏫 Register School + Create Admin
           </button>
         </form>
       </div>
-
-      <!-- History -->
       <div class="card">
-        <div class="sec-title" style="margin-bottom:16px">📋 Subscription History</div>
-        <div class="tbl-wrap">
-          <table class="dev-table">
-            <thead><tr><th>Date</th><th>Event</th><th>Plan</th><th>Valid Until</th></tr></thead>
-            <tbody>{hist_rows or '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No history yet</td></tr>'}</tbody>
-          </table>
+        <div class="sec-title" style="margin-bottom:14px">ℹ️ What happens next</div>
+        <div style="display:flex;flex-direction:column;gap:14px;font-size:13.5px;color:var(--text2)">
+          <div>✅ School is created with a unique ID</div>
+          <div>✅ A 10-day FREE TRIAL subscription starts automatically</div>
+          <div>✅ SCHOOL_ADMIN account is created with the credentials you provide</div>
+          <div>✅ Admin can log in immediately at <strong style="color:var(--text)">/login</strong></div>
+          <div>✅ Admin can create teacher accounts from their dashboard</div>
+          <div>✅ Data for this school is stored separately from all other schools</div>
         </div>
       </div>
+    </div>"""
+    return layout("Register School", content, "admin")
+
+
+@app.route("/superadmin/school/<school_id>")
+@super_admin_required
+def superadmin_school_detail(school_id):
+    school   = db.school_get(school_id)
+    if not school:
+        return redirect("/superadmin")
+    sub      = db.sub_get(school_id)
+    hist     = db.sub_history_get(school_id)
+    admins   = db.users_by_school(school_id, "SCHOOL_ADMIN")
+    teachers = db.users_by_school(school_id, "TEACHER")
+    created  = request.args.get("created","")
+
+    created_banner = '<div class="alert alert-success" style="margin-bottom:16px">✅ School registered successfully! 10-day trial activated.</div>' if created else ""
+
+    hist_rows = "".join(f"""<tr>
+      <td>{h['created_at'][:16]}</td>
+      <td style="font-weight:600">{h['event']}</td>
+      <td>{(h.get('plan_name') or '—').replace('_',' ').title()}</td>
+      <td style="color:var(--text2)">{h.get('note','')}</td>
+    </tr>""" for h in hist)
+
+    teacher_rows = "".join(f"""<tr>
+      <td><strong>{t['full_name'] or t['username']}</strong></td>
+      <td>{t['username']}</td>
+      <td><span class="pill {'pill-green' if t['is_active'] else 'pill-red'}">{'Active' if t['is_active'] else 'Inactive'}</span></td>
+    </tr>""" for t in teachers)
+
+    content = f"""
+    <div style="margin-bottom:16px">
+      <a href="/superadmin" class="btn btn-ghost btn-sm">← All Schools</a>
     </div>
-
-    <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap">
-      <a href="/" class="btn btn-ghost">🏠 Dashboard</a>
-      <a href="/students" class="btn btn-ghost">👥 Students</a>
-      <a href="/sections" class="btn btn-ghost">📚 Sections</a>
-      <a href="/admin" class="btn btn-ghost">⚙ Admin</a>
-      <a href="/upgrade" class="btn btn-ghost">⭐ Upgrade Page</a>
+    {created_banner}
+    <div class="hero" style="margin-bottom:20px">
+      <div>
+        <h1>🏫 {school['name']}</h1>
+        <p>ID: <strong>{school['id']}</strong> · Email: {school['email'] or '—'}</p>
+      </div>
     </div>
-    """
-    return layout("Developer Panel", content, "admin")
+    <div class="grid-2" style="align-items:start;margin-bottom:20px">
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">📋 Subscription</div>
+        <table style="font-size:13.5px"><tbody>
+          <tr><td style="color:var(--muted);border:none;padding:7px 0;width:120px">Status</td>
+              <td style="border:none"><span class="pill {'pill-green' if sub and sub['is_active'] else ('pill-blue' if sub and sub['is_trial'] else 'pill-red')}">{sub['status'] if sub else '—'}</span></td></tr>
+          <tr><td style="color:var(--muted);border:none;padding:7px 0">Plan</td>
+              <td style="border:none;font-weight:600">{(sub.get('plan_name') or '—').replace('_',' ').title() if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);border:none;padding:7px 0">Trial End</td>
+              <td style="border:none">{sub.get('trial_end','—') if sub else '—'}</td></tr>
+          <tr><td style="color:var(--muted);border:none;padding:7px 0">Sub End</td>
+              <td style="border:none">{sub.get('subscription_end','—') if sub else '—'}</td></tr>
+        </tbody></table>
+        <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+          <form method="POST" action="/superadmin/school/{school_id}/extend" style="display:inline">
+            <input type="hidden" name="days" value="10">
+            <button type="submit" class="btn btn-cyan btn-sm">+10 Day Trial</button>
+          </form>
+          <form method="POST" action="/superadmin/school/{school_id}/activate" style="display:inline">
+            <input type="hidden" name="plan" value="PROFESSIONAL">
+            <input type="hidden" name="days" value="365">
+            <button type="submit" class="btn btn-green btn-sm">Activate Pro</button>
+          </form>
+        </div>
+      </div>
+      <div class="card">
+        <div class="sec-title" style="margin-bottom:14px">👥 Users</div>
+        <div style="margin-bottom:10px;font-size:13px;color:var(--text2)">
+          School Admins: <strong style="color:var(--text)">{len(admins)}</strong> &nbsp;·&nbsp;
+          Teachers: <strong style="color:var(--text)">{len(teachers)}</strong>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Name</th><th>Username</th><th>Status</th></tr></thead>
+          <tbody>{teacher_rows or '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:14px">No teachers yet</td></tr>'}</tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="sec-title" style="margin-bottom:14px">📜 Subscription History</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Date</th><th>Event</th><th>Plan</th><th>Note</th></tr></thead>
+        <tbody>{hist_rows or '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px">No history</td></tr>'}</tbody>
+      </table></div>
+    </div>"""
+    return layout(school['name'], content, "admin")
 
 
-@app.route("/dev/action", methods=["POST"])
-def dev_action():
-    if not session.get("dev_logged_in"):
-        return redirect("/dev/login")
+@app.route("/superadmin/school/<school_id>/extend", methods=["POST"])
+@super_admin_required
+def superadmin_extend_trial(school_id):
+    days = int(request.form.get("days","10"))
+    db.sub_extend_trial(school_id, days)
+    return redirect(f"/superadmin/school/{school_id}")
 
-    action = request.form.get("action","")
-    rec    = sub_load()
-    now    = datetime.now()
 
-    if action == "activate_premium":
-        plan_key = request.form.get("plan","monthly")
-        if plan_key in PLANS:
-            p   = PLANS[plan_key]
-            end = now + timedelta(days=p["period"])
-            rec["status"]        = "active"
-            rec["plan"]          = plan_key
-            rec["premium_start"] = now.strftime("%Y-%m-%d")
-            rec["premium_end"]   = end.strftime("%Y-%m-%d")
-            rec["payment_status"]= "dev_activated"
-            rec["history"].append({"event":"dev_activated","plan":plan_key,
-                                   "date":now.strftime("%Y-%m-%d %H:%M:%S"),
-                                   "end":end.strftime("%Y-%m-%d")})
+@app.route("/superadmin/school/<school_id>/activate", methods=["POST"])
+@super_admin_required
+def superadmin_activate_plan(school_id):
+    plan = request.form.get("plan","PROFESSIONAL")
+    days = int(request.form.get("days","365"))
+    db.sub_activate(school_id, plan, days)
+    return redirect(f"/superadmin/school/{school_id}")
 
-    elif action == "extend_trial":
-        try:
-            days = int(request.form.get("days","10"))
-        except:
-            days = 10
-        try:
-            cur_end = datetime.strptime(rec["trial_end"], "%Y-%m-%d")
-        except:
-            cur_end = now
-        new_end = max(cur_end, now) + timedelta(days=days)
-        rec["trial_end"] = new_end.strftime("%Y-%m-%d")
-        if rec.get("status") == "expired":
-            rec["status"] = "trial"
-        rec["history"].append({"event":"trial_extended","plan":"trial",
-                               "date":now.strftime("%Y-%m-%d %H:%M:%S"),
-                               "end":new_end.strftime("%Y-%m-%d")})
 
-    elif action == "reset_trial":
-        end = now + timedelta(days=TRIAL_DAYS)
-        rec["status"]        = "trial"
-        rec["plan"]          = None
-        rec["trial_start"]   = now.strftime("%Y-%m-%d")
-        rec["trial_end"]     = end.strftime("%Y-%m-%d")
-        rec["premium_start"] = None
-        rec["premium_end"]   = None
-        rec["payment_status"]= None
-        rec["history"].append({"event":"reset_trial","plan":"trial",
-                               "date":now.strftime("%Y-%m-%d %H:%M:%S"),
-                               "end":end.strftime("%Y-%m-%d")})
+# ── Profile image / static file routes (school-scoped) ────────────
 
-    sub_save(rec)
-    return redirect("/dev")
+@app.route("/profile-img/<name>")
+@login_required
+def profile_img(name):
+    from auth import school_data_dir as _sdir
+    sid      = current_school_id()
+    user_dir = os.path.join(_sdir(sid), name)
+    for ext in ("jpg","jpeg","png","webp"):
+        pf = os.path.join(user_dir, f"_profile.{ext}")
+        if os.path.exists(pf):
+            return send_file(pf)
+    return ("Not found", 404)
+
+
+@app.route("/img/<name>/<file>")
+@login_required
+def img(name, file):
+    from auth import school_data_dir as _sdir
+    sid = current_school_id()
+    return send_file(os.path.join(_sdir(sid), name, file))
+
+
+@app.route("/cam/<file>")
+@login_required
+def cam(file):
+    from auth import school_data_dir as _sdir
+    sid = current_school_id()
+    return send_file(os.path.join(_sdir(sid), file))
+
+
+@app.route("/download")
+@login_required
+@school_admin_required
+def download():
+    path = att_file_for(current_school_id())
+    return send_file(path, as_attachment=True) if os.path.exists(path) else ("No data", 404)
+
+
+@app.route("/delete")
+@login_required
+@school_admin_required
+def delete():
+    try:
+        path = att_file_for(current_school_id())
+        if os.path.exists(path):
+            os.remove(path)
+        content = '<div class="alert alert-success">✅ Attendance records cleared.</div><a href="/admin" class="btn btn-ghost">← Admin</a>'
+        return layout("Cleared", content, "admin")
+    except Exception as e:
+        return layout("Error", f'<div class="alert alert-error">❌ {str(e)}</div>', "admin")
+
+
+@app.route("/graph-image")
+@login_required
+def graph_image():
+    sid  = current_school_id()
+    path = os.path.join(GRAPH_DIR, sid or "default", "graph.png") if sid else os.path.join(GRAPH_DIR, "graph.png")
+    return send_file(path) if os.path.exists(path) else ("Not found", 404)
+
