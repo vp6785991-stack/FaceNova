@@ -13,7 +13,8 @@ from styles import CSS
 
 DATA_DIR     = "data"
 GRAPH_DIR    = "graphs"
-SECTIONS_FILE = os.path.join("data", "sections.json")
+# sections file is now per-school (computed at runtime)
+SECTIONS_FILE = os.path.join("data", "sections.json")  # legacy fallback
 os.makedirs(DATA_DIR,  exist_ok=True)
 os.makedirs(GRAPH_DIR, exist_ok=True)
 ATT_FILE = os.path.join(DATA_DIR, "attendance.csv")
@@ -30,212 +31,115 @@ PLANS = {
     "5year":   {"name": "5-Year Plan",    "price": 3999, "period": 1825, "label": "₹3,999 / 5 years"},
 }
 
-# Developer / hidden admin — always unlimited
-DEV_CREDENTIALS = {
-    "devadmin": "FaceNovaDev@2024"
-}
-
-FREE_ROUTES = {"/", "/login", "/upgrade", "/upgrade/activate",
-               "/teacher/login", "/teacher/logout", "/dev/login",
-               "/dev", "/dev/logout"}
+# Free routes — accessible without login (auth.py enforces the rest)
+FREE_ROUTES = {"/login", "/logout", "/upgrade", "/upgrade/activate"}
 
 face_detector = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
 # ══════════════════════════════════════════════════════
-#  SUBSCRIPTION HELPERS
+#  SUBSCRIPTION BANNER (uses db layer)
 # ══════════════════════════════════════════════════════
 
-def sub_load():
-    """Load subscription record. Auto-create trial on first run."""
-    if os.path.exists(SUB_FILE):
-        try:
-            return json.load(open(SUB_FILE))
-        except:
-            pass
-    # First run — create 10-day trial
-    now   = datetime.now()
-    end   = now + timedelta(days=TRIAL_DAYS)
-    rec   = {
-        "status":          "trial",       # trial | active | expired
-        "plan":            None,
-        "trial_start":     now.strftime("%Y-%m-%d"),
-        "trial_end":       end.strftime("%Y-%m-%d"),
-        "premium_start":   None,
-        "premium_end":     None,
-        "payment_status":  None,
-        "history":         [],
-        "school_name":     "My School",
-    }
-    sub_save(rec)
-    return rec
-
-def sub_save(rec):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    json.dump(rec, open(SUB_FILE, "w"), indent=2)
-
-def sub_status():
-    """
-    Returns dict with computed status fields:
-      status       : trial | active | expired
-      days_left    : int  (trial days remaining, -1 if not trial)
-      is_premium   : bool
-      is_expired   : bool
-      is_trial     : bool
-      warn         : bool (3 days or less left)
-      plan         : plan key or None
-    """
-    rec  = sub_load()
-    now  = datetime.now().date()
-    stat = rec.get("status", "trial")
-
-    # Developer session always passes
-    if session.get("dev_logged_in"):
-        return {"status":"active","days_left":-1,"is_premium":True,
-                "is_expired":False,"is_trial":False,"warn":False,
-                "plan":"lifetime","rec":rec}
-
-    days_left = -1
-    if stat == "trial":
-        try:
-            end       = datetime.strptime(rec["trial_end"], "%Y-%m-%d").date()
-            days_left = (end - now).days
-        except:
-            days_left = 0
-        if days_left <= 0:
-            # auto-expire
-            rec["status"] = "expired"
-            sub_save(rec)
-            stat = "expired"
-
-    elif stat == "active":
-        # check premium expiry
-        try:
-            pend = datetime.strptime(rec["premium_end"], "%Y-%m-%d").date()
-            if pend < now:
-                rec["status"] = "expired"
-                sub_save(rec)
-                stat = "expired"
-        except:
-            pass
-
-    return {
-        "status":     stat,
-        "days_left":  days_left,
-        "is_premium": stat == "active",
-        "is_expired": stat == "expired",
-        "is_trial":   stat == "trial",
-        "warn":       stat == "trial" and 0 < days_left <= 3,
-        "plan":       rec.get("plan"),
-        "rec":        rec,
-    }
-
 def sub_banner():
-    """Return HTML banner string to inject into every page."""
-    s = sub_status()
-    if session.get("dev_logged_in"):
+    """Return HTML banner for the current school's subscription status."""
+    from flask import session as _sess
+    import db as _db
+    role      = _sess.get("role")
+    school_id = _sess.get("school_id")
+
+    if role == "SUPER_ADMIN":
         return '''<div style="background:linear-gradient(90deg,rgba(139,92,246,0.18),rgba(59,130,246,0.1));border-bottom:1px solid rgba(139,92,246,0.25);padding:8px 24px;font-size:12.5px;display:flex;align-items:center;gap:10px">
-          <span style="font-size:14px">👑</span>
-          <strong style="color:var(--purple-l)">Developer Mode</strong>
-          <span style="color:var(--text2)">· Lifetime Premium · All features unlocked</span>
-          <a href="/dev" style="margin-left:auto;color:var(--purple-l);font-size:12px;font-weight:700">Dev Panel →</a>
+          <span>👑</span>
+          <strong style="color:var(--purple-l)">Super Admin Mode</strong>
+          <span style="color:var(--text2)">· Full platform access</span>
+          <a href="/superadmin" style="margin-left:auto;color:var(--purple-l);font-size:12px;font-weight:700">Admin Panel →</a>
         </div>'''
-    if s["is_expired"]:
+
+    if not school_id:
+        return ""
+
+    sub = _db.sub_get(school_id)
+    if not sub:
+        return ""
+
+    if sub["is_expired"]:
         return '''<div style="background:rgba(239,68,68,0.12);border-bottom:1px solid rgba(239,68,68,0.25);padding:8px 24px;font-size:12.5px;display:flex;align-items:center;gap:10px">
-          <span>🔒</span>
-          <strong style="color:var(--red-l)">Free Trial Expired</strong>
-          <span style="color:var(--text2)">· Upgrade to continue using premium features</span>
+          <span>🔒</span><strong style="color:var(--red-l)">Subscription Expired</strong>
+          <span style="color:var(--text2)">· Upgrade to restore access</span>
           <a href="/upgrade" style="margin-left:auto;background:var(--red);color:white;padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;text-decoration:none">Upgrade Now</a>
         </div>'''
-    if s["warn"]:
+    if sub["warn"]:
         return f'''<div style="background:rgba(245,158,11,0.12);border-bottom:1px solid rgba(245,158,11,0.25);padding:8px 24px;font-size:12.5px;display:flex;align-items:center;gap:10px">
-          <span>⚠️</span>
-          <strong style="color:var(--amber-l)">Trial expires in {s["days_left"]} day{"s" if s["days_left"]!=1 else ""}!</strong>
-          <span style="color:var(--text2)">· Upgrade now to keep your data and features</span>
+          <span>⚠️</span><strong style="color:var(--amber-l)">Trial expires in {sub["days_left"]} day{"s" if sub["days_left"]!=1 else ""}!</strong>
           <a href="/upgrade" style="margin-left:auto;background:var(--amber);color:#000;padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700;text-decoration:none">Upgrade</a>
         </div>'''
-    if s["is_trial"]:
+    if sub["is_trial"]:
         return f'''<div style="background:rgba(59,130,246,0.08);border-bottom:1px solid rgba(59,130,246,0.15);padding:8px 24px;font-size:12.5px;display:flex;align-items:center;gap:10px">
-          <span>🎉</span>
-          <strong style="color:var(--blue)">Free Trial Active</strong>
-          <span style="color:var(--text2)">· {s["days_left"]} day{"s" if s["days_left"]!=1 else ""} remaining</span>
+          <span>🎉</span><strong style="color:var(--blue)">Free Trial Active</strong>
+          <span style="color:var(--text2)">· {sub["days_left"]} day{"s" if sub["days_left"]!=1 else ""} remaining</span>
           <a href="/upgrade" style="margin-left:auto;color:var(--blue);font-size:12px;font-weight:600;text-decoration:none">View Plans →</a>
         </div>'''
-    if s["is_premium"]:
-        return '''<div style="background:rgba(16,185,129,0.07);border-bottom:1px solid rgba(16,185,129,0.15);padding:7px 24px;font-size:12px;display:flex;align-items:center;gap:10px">
-          <span>✅</span>
-          <strong style="color:var(--green-l)">Premium Active</strong>
+    if sub["is_active"]:
+        plan_label = sub.get("plan_name","").replace("_"," ").title()
+        return f'''<div style="background:rgba(16,185,129,0.07);border-bottom:1px solid rgba(16,185,129,0.15);padding:7px 24px;font-size:12px;display:flex;align-items:center;gap:10px">
+          <span>✅</span><strong style="color:var(--green-l)">{plan_label} Active</strong>
           <span style="color:var(--muted)">· All features unlocked</span>
         </div>'''
     return ""
 
-def premium_required(f):
-    """
-    Decorator: if trial expired, redirect locked pages to /upgrade.
-    Developer session always passes. Free routes always pass.
-    """
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if session.get("dev_logged_in"):
-            return f(*args, **kwargs)
-        path = request.path
-        # always allow free routes
-        for fr in FREE_ROUTES:
-            if path == fr or path.startswith(fr.rstrip("/")+"/"):
-                return f(*args, **kwargs)
-        s = sub_status()
-        if s["is_expired"]:
-            # allow dashboard and upgrade even when expired
-            if path in ("/", "/upgrade", "/upgrade/activate"):
-                return f(*args, **kwargs)
-            return redirect("/upgrade?locked=1")
-        return f(*args, **kwargs)
-    return decorated
+# ──────────────────────────────────────────────────────
 
-# ──────────────────────────────────────────────────────
-#  SECTION HELPERS
-# ──────────────────────────────────────────────────────
 
 DEFAULT_SECTIONS = ["6A","6B","7A","7B","8A","8B","8C","9A","9B","10A"]
 
-def load_sections():
-    """Return list of section names."""
-    if os.path.exists(SECTIONS_FILE):
+def _sections_file(school_id=None):
+    from flask import session as _sess
+    sid = school_id or _sess.get("school_id") or "default"
+    d   = os.path.join(DATA_DIR, sid)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "sections.json")
+
+def load_sections(school_id=None):
+    """Return list of section names for this school."""
+    sf = _sections_file(school_id)
+    if os.path.exists(sf):
         try:
-            return json.load(open(SECTIONS_FILE))
+            return json.load(open(sf))
         except:
             pass
     return list(DEFAULT_SECTIONS)
 
-def save_sections(sections):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    json.dump(sections, open(SECTIONS_FILE,"w"))
+def save_sections(sections, school_id=None):
+    sf = _sections_file(school_id)
+    os.makedirs(os.path.dirname(sf), exist_ok=True)
+    json.dump(sections, open(sf,"w"))
 
-def student_meta_file(name):
-    return os.path.join(DATA_DIR, name, "_meta.json")
+def student_meta_file(name, school_id=None):
+    sdir = school_data_dir(school_id)
+    return os.path.join(sdir, name, "_meta.json")
 
-def load_meta(name):
-    """Load full meta dict for a student."""
-    mf = student_meta_file(name)
+def load_meta(name, school_id=None):
+    """Load full meta dict for a student (school-scoped)."""
+    mf = student_meta_file(name, school_id)
     if os.path.exists(mf):
         try: return json.load(open(mf))
         except: pass
     return {}
 
-def save_meta(name, meta):
-    mf = student_meta_file(name)
+def save_meta(name, meta, school_id=None):
+    mf = student_meta_file(name, school_id)
     os.makedirs(os.path.dirname(mf), exist_ok=True)
     json.dump(meta, open(mf,"w"))
 
-def get_student_section(name):
-    return load_meta(name).get("section","")
+def get_student_section(name, school_id=None):
+    return load_meta(name, school_id).get("section","")
 
-def set_student_section(name, section):
-    meta = load_meta(name)
+def set_student_section(name, section, school_id=None):
+    meta = load_meta(name, school_id)
     meta["section"] = section
-    save_meta(name, meta)
+    save_meta(name, meta, school_id)
 
 def students_in_section(section=""):
     """All students optionally filtered by section."""
@@ -251,13 +155,27 @@ def students_in_section(section=""):
 #  DATA HELPERS
 # ══════════════════════════════════════════════════════
 
-def read_all_records(section=""):
+def att_file_for(school_id=None):
+    """Return the correct attendance CSV path for a school."""
+    if school_id:
+        school_dir = os.path.join(DATA_DIR, school_id)
+        os.makedirs(school_dir, exist_ok=True)
+        return os.path.join(school_dir, "attendance.csv")
+    # legacy fallback for single-school mode
+    return ATT_FILE
+
+def read_all_records(section="", school_id=None):
     """Return list of dicts: name, date, status, time, section.
-       Optionally filter by section."""
+       Always scoped to school_id (from session if not provided).
+       Optionally further filter by section.
+    """
+    from flask import session as _sess
+    sid  = school_id or _sess.get("school_id")
+    path = att_file_for(sid)
     rows = []
-    if not os.path.exists(ATT_FILE):
+    if not os.path.exists(path):
         return rows
-    with open(ATT_FILE, newline="") as f:
+    with open(path, newline="") as f:
         for r in csv.reader(f):
             if len(r) >= 3:
                 rec = {
@@ -265,16 +183,41 @@ def read_all_records(section=""):
                     "date":    r[1],
                     "status":  r[2],
                     "time":    r[3] if len(r) > 3 else "—",
-                    "section": r[4] if len(r) > 4 else get_student_section(r[0]),
+                    "section": r[4] if len(r) > 4 else "",
                 }
                 if section and rec["section"] != section:
                     continue
                 rows.append(rec)
     return rows
 
-def enrolled_students(section=""):
-    """Return all students, optionally filtered by section."""
-    return students_in_section(section)
+def write_att_record(row, school_id=None):
+    """Append one attendance row to the correct school's CSV."""
+    from flask import session as _sess
+    sid  = school_id or _sess.get("school_id")
+    path = att_file_for(sid)
+    with open(path, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+def school_data_dir(school_id=None):
+    """Return and create the school-specific data directory."""
+    from flask import session as _sess
+    sid = school_id or _sess.get("school_id") or "default"
+    d   = os.path.join(DATA_DIR, sid, "students")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def enrolled_students(section="", school_id=None):
+    """Return all students for this school, optionally filtered by section."""
+    from flask import session as _sess
+    sid  = school_id or _sess.get("school_id")
+    sdir = school_data_dir(sid)
+    all_s = sorted([
+        x for x in os.listdir(sdir)
+        if os.path.isdir(os.path.join(sdir, x))
+    ])
+    if not section:
+        return all_s
+    return [s for s in all_s if get_student_section(s, sid) == section]
 
 def stats_for_student(name, records=None):
     if records is None:
@@ -438,3 +381,4 @@ tick();setInterval(tick,1000);
 
 {_exp_popup}
 </body></html>"""
+
