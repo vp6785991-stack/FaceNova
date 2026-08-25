@@ -288,22 +288,27 @@ def layout(page_title, content, active="dashboard"):
         nav_html += f'<a href="{href}" class="nav-item {cls}">{icon}<span>{label}</span></a>'
 
     today_str  = datetime.now().strftime("%Y-%m-%d")
-    _sub       = sub_status()
+    # Resolve subscription state using the new db layer
+    import db as _db
+    _school_id = session.get("school_id")
+    _role      = session.get("role","")
+    _sub       = _db.sub_get(_school_id) if _school_id else None
     _banner    = sub_banner()
     _exp_popup = ""
-    if _sub["is_expired"] and not session.get("dev_logged_in"):
+    # Show expired popup when subscription is expired, except for SUPER_ADMIN
+    if _sub and _sub.get("is_expired") and _role != "SUPER_ADMIN":
         _exp_popup = '''
         <div class="expired-overlay" id="expiredOverlay">
           <div class="expired-modal">
             <span class="lock-icon">🔒</span>
-            <div class="expired-title">Free Trial Expired</div>
+            <div class="expired-title">Subscription Expired</div>
             <div class="expired-sub">
-              Your 10-day free trial has ended.<br>
+              Your subscription has expired.<br>
               Upgrade to <strong>Premium</strong> to continue using FaceNova AI.<br>
               <span style="color:var(--muted);font-size:12px">All your data is safe — nothing has been deleted.</span>
             </div>
             <a href="/upgrade" style="display:inline-block;width:100%;padding:14px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:white;border-radius:12px;font-weight:700;font-size:15px;text-decoration:none;margin-bottom:12px">
-              🚀 Upgrade to Premium
+              🚀 View Upgrade Plans
             </a>
             <a href="/" style="font-size:13px;color:var(--text2);text-decoration:none">
               View Dashboard →
@@ -381,4 +386,5 @@ tick();setInterval(tick,1000);
 
 {_exp_popup}
 </body></html>"""
+
 
