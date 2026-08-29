@@ -288,6 +288,13 @@ def layout(page_title, content, active="dashboard"):
         nav_html += f'<a href="{href}" class="nav-item {cls}">{icon}<span>{label}</span></a>'
 
     today_str  = datetime.now().strftime("%Y-%m-%d")
+    # Build drawer nav for mobile
+    drawer_nav = ""
+    for key, href, path_d, label in NAV:
+        is_act  = key == active
+        act_cls = "drawer-active" if is_act else ""
+        icon_svg = f'<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="{path_d}"/></svg>'
+        drawer_nav += f'<a href="{href}" class="drawer-item {act_cls}">{icon_svg}<span>{label}</span></a>'
     # Resolve subscription state using the new db layer
     import db as _db
     _school_id = session.get("school_id")
@@ -373,18 +380,83 @@ def layout(page_title, content, active="dashboard"):
   <div class="page">{content}</div>
 </div>
 
+<!-- ── MOBILE TOPBAR ──────────────────────── -->
+<div class="mobile-topbar">
+  <div class="mobile-logo">
+    <div class="logo-icon" style="width:30px;height:30px;font-size:14px">🧠</div>
+    Face<span>Nova</span>
+  </div>
+  <button class="hamburger-btn" onclick="openDrawer()" aria-label="Menu">
+    <span></span><span></span><span></span>
+  </button>
+</div>
+
+<!-- ── MOBILE DRAWER ─────────────────────── -->
+<div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px">Menu</div>
+    <button class="drawer-close" onclick="closeDrawer()">✕</button>
+  </div>
+  {drawer_nav}
+  <div style="margin-top:auto;padding:16px 20px;border-top:1px solid var(--border)">
+    <a href="/logout" style="display:flex;align-items:center;gap:10px;color:var(--red-l);font-size:14px;font-weight:600;text-decoration:none;padding:10px 0">
+      <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+      Sign Out
+    </a>
+  </div>
+</div>
+
+<!-- ── MOBILE BOTTOM NAV ─────────────────── -->
+<nav class="mobile-nav">
+  <div class="mobile-nav-inner">
+    <a href="/" class="mnav-item {'mnav-active' if active=='dashboard' else ''}">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+      Home
+    </a>
+    <a href="/scan" class="mnav-item {'mnav-active' if active=='scan' else ''}">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 10l4.553-2.069A1 1 0 0121 8.82V15a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/></svg>
+      Scan
+    </a>
+    <a href="/students" class="mnav-item {'mnav-active' if active=='students' else ''}">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      Students
+    </a>
+    <a href="/upgrade" class="mnav-item mnav-premium {'mnav-active' if active=='upgrade' else ''}">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+      Premium
+    </a>
+    <a href="/teacher" class="mnav-item {'mnav-active' if active=='teacher' else ''}">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/></svg>
+      Dashboard
+    </a>
+  </div>
+</nav>
+
 <script>
 function tick(){{
   const n=new Date();
-  document.getElementById('clock').textContent=
+  const el=document.getElementById('clock');
+  if(el) el.textContent=
     n.toLocaleTimeString('en-US',{{hour:'2-digit',minute:'2-digit'}})+
     ' · '+n.toLocaleDateString('en-US',{{weekday:'short',month:'short',day:'numeric'}});
 }}
 tick();setInterval(tick,1000);
-</script>
 
+function openDrawer(){{
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawerOverlay').style.display='block';
+  document.body.style.overflow='hidden';
+}}
+function closeDrawer(){{
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawerOverlay').style.display='none';
+  document.body.style.overflow='';
+}}
+</script>
 
 {_exp_popup}
 </body></html>"""
+
 
 
