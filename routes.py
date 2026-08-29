@@ -3068,3 +3068,476 @@ def graph_image():
     path = os.path.join(GRAPH_DIR, sid or "default", "graph.png") if sid else os.path.join(GRAPH_DIR, "graph.png")
     return send_file(path) if os.path.exists(path) else ("Not found", 404)
 
+
+
+# ══════════════════════════════════════════════════════
+#  RAZORPAY PAYMENT INTEGRATION
+# ══════════════════════════════════════════════════════
+# Set these in your .env file:
+#   RAZORPAY_KEY_ID     = rzp_live_XXXXXXXXXXXXXXX
+#   RAZORPAY_KEY_SECRET = your_secret_here
+# Get them free at razorpay.com → Settings → API Keys
+
+import os as _os
+import json as _json
+import hashlib as _hashlib
+import hmac as _hmac
+
+RAZORPAY_KEY_ID     = _os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = _os.environ.get("RAZORPAY_KEY_SECRET", "")
+
+# Plan pricing in paise (1 INR = 100 paise)
+RAZORPAY_PLANS = {
+    "BASIC":        {"amount": 19900,  "days": 30,   "label": "Basic Plan — ₹199/month"},
+    "PROFESSIONAL": {"amount": 149900, "days": 365,  "label": "Professional Plan — ₹1,499/year"},
+    "ENTERPRISE":   {"amount": 399900, "days": 1825, "label": "Enterprise Plan — ₹3,999/5 years"},
+}
+
+
+@app.route("/pay/<plan_key>")
+@login_required
+@role_required("SCHOOL_ADMIN", "SUPER_ADMIN")
+def pay_page(plan_key):
+    if plan_key not in RAZORPAY_PLANS:
+        return redirect("/upgrade")
+
+    plan = RAZORPAY_PLANS[plan_key]
+    sid  = current_school_id()
+    sub  = db.sub_get(sid) if sid else None
+
+    # If Razorpay not configured — show mock activation
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        content = f"""
+        <div style="max-width:480px;margin:40px auto">
+          <div class="card" style="text-align:center;padding:36px">
+            <div style="font-size:48px;margin-bottom:14px">⚠️</div>
+            <div class="sec-title" style="margin-bottom:10px">Razorpay Not Configured</div>
+            <div style="color:var(--text2);font-size:13.5px;line-height:1.7;margin-bottom:20px">
+              To accept real payments, add your Razorpay API keys to your <code>.env</code> file:<br><br>
+              <code style="background:rgba(255,255,255,0.05);padding:10px 16px;border-radius:8px;display:block;text-align:left;font-size:12px">
+                RAZORPAY_KEY_ID=rzp_live_XXXXX<br>
+                RAZORPAY_KEY_SECRET=your_secret
+              </code>
+            </div>
+            <div style="color:var(--text2);font-size:13px;margin-bottom:20px">
+              Get free API keys at <strong>razorpay.com</strong> → Dashboard → Settings → API Keys
+            </div>
+            <form method="POST" action="/upgrade/activate">
+              <input type="hidden" name="plan" value="{plan_key}">
+              <input type="hidden" name="days" value="{plan['days']}">
+              <button type="submit" class="btn btn-ghost" style="width:100%;justify-content:center">
+                🧪 Activate Demo (No Payment)
+              </button>
+            </form>
+            <a href="/upgrade" style="display:block;margin-top:12px;font-size:13px;color:var(--muted)">← Back</a>
+          </div>
+        </div>"""
+        return layout("Payment", content, "upgrade")
+
+    # Create Razorpay order via API
+    import urllib.request, urllib.parse, base64 as _b64
+    order_data = _json.dumps({
+        "amount":   plan["amount"],
+        "currency": "INR",
+        "receipt":  f"facenova_{sid}_{plan_key}",
+        "notes":    {"school_id": sid, "plan": plan_key}
+    }).encode()
+
+    creds = _b64.b64encode(f"{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}".encode()).decode()
+    req   = urllib.request.Request(
+        "https://api.razorpay.com/v1/orders",
+        data=order_data,
+        headers={"Content-Type":"application/json","Authorization":f"Basic {creds}"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            order = _json.loads(resp.read())
+    except Exception as e:
+        content = f'<div class="alert alert-error">❌ Could not create payment order: {str(e)}</div><a href="/upgrade" class="btn btn-ghost">← Back</a>'
+        return layout("Payment Error", content, "upgrade")
+
+    school = db.school_get(sid) or {}
+    content = f"""
+    <div style="max-width:520px;margin:30px auto">
+      <div class="card" style="padding:32px">
+        <div style="text-align:center;margin-bottom:24px">
+          <div style="font-size:44px;margin-bottom:10px">💳</div>
+          <div class="sec-title" style="font-size:20px">{plan['label']}</div>
+          <div style="color:var(--text2);font-size:13px;margin-top:6px">
+            Secure payment powered by Razorpay
+          </div>
+        </div>
+
+        <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:20px;font-size:13.5px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="color:var(--muted)">Plan</span>
+            <strong>{plan_key.replace('_',' ').title()}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="color:var(--muted)">Amount</span>
+            <strong>₹{plan['amount']//100}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span style="color:var(--muted)">Valid for</span>
+            <strong>{plan['days']} days</strong>
+          </div>
+        </div>
+
+        <button id="rzp-btn" class="btn btn-primary"
+                style="width:100%;justify-content:center;padding:14px;font-size:15px">
+          🔐 Pay ₹{plan['amount']//100} Securely
+        </button>
+        <div style="text-align:center;margin-top:10px;font-size:12px;color:var(--muted)">
+          UPI · Cards · Net Banking · Wallets accepted
+        </div>
+        <a href="/upgrade" style="display:block;text-align:center;margin-top:14px;font-size:13px;color:var(--muted)">← Cancel</a>
+      </div>
+    </div>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <script>
+    var options = {{
+      key:         "{RAZORPAY_KEY_ID}",
+      amount:      "{order['amount']}",
+      currency:    "INR",
+      name:        "FaceNova AI",
+      description: "{plan['label']}",
+      order_id:    "{order['id']}",
+      prefill:     {{name:"{school.get('name','')}", email:"{school.get('email','')}"}},
+      theme:       {{color:"#2563eb"}},
+      handler: function(response){{
+        // Payment succeeded — verify on server
+        fetch('/pay/verify', {{
+          method: 'POST',
+          headers: {{'Content-Type':'application/json'}},
+          body: JSON.stringify({{
+            razorpay_order_id:   response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature:  response.razorpay_signature,
+            plan:  '{plan_key}',
+            days:  {plan['days']}
+          }})
+        }}).then(r=>r.json()).then(d=>{{
+          if(d.success) window.location='/pay/success';
+          else alert('Verification failed: '+d.error);
+        }});
+      }},
+      modal: {{ondismiss: function(){{ document.getElementById('rzp-btn').disabled=false; }} }}
+    }};
+    document.getElementById('rzp-btn').onclick = function(){{
+      this.disabled=true;
+      var rzp = new Razorpay(options);
+      rzp.open();
+    }};
+    </script>
+    """
+    return layout("Checkout", content, "upgrade")
+
+
+@app.route("/pay/verify", methods=["POST"])
+@login_required
+def pay_verify():
+    """Verify Razorpay payment signature server-side — never trust client."""
+    try:
+        data       = _json.loads(request.data)
+        order_id   = data.get("razorpay_order_id","")
+        payment_id = data.get("razorpay_payment_id","")
+        signature  = data.get("razorpay_signature","")
+        plan_key   = data.get("plan","")
+        days       = int(data.get("days", 30))
+
+        # Verify HMAC-SHA256 signature
+        expected = _hmac.new(
+            RAZORPAY_KEY_SECRET.encode(),
+            f"{order_id}|{payment_id}".encode(),
+            _hashlib.sha256
+        ).hexdigest()
+
+        if not _hmac.compare_digest(expected, signature):
+            return app.response_class(
+                _json.dumps({"success": False, "error": "Invalid signature"}),
+                mimetype="application/json", status=400
+            )
+
+        # Signature valid — activate subscription
+        sid = current_school_id()
+        if sid and plan_key in RAZORPAY_PLANS:
+            db.sub_activate(sid, plan_key, days)
+            # Log payment ID in history
+            conn = db.get_conn()
+            conn.execute(
+                "INSERT INTO sub_history (school_id,event,plan_name,note,created_at) VALUES (?,?,?,?,?)",
+                (sid, "PAYMENT_RECEIVED", plan_key,
+                 f"Razorpay payment_id={payment_id}", datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
+
+        return app.response_class(
+            _json.dumps({"success": True}),
+            mimetype="application/json"
+        )
+    except Exception as e:
+        return app.response_class(
+            _json.dumps({"success": False, "error": str(e)}),
+            mimetype="application/json", status=500
+        )
+
+
+@app.route("/pay/success")
+@login_required
+def pay_success():
+    content = """
+    <div style="max-width:480px;margin:60px auto;text-align:center">
+      <div class="card" style="padding:44px">
+        <div style="font-size:72px;margin-bottom:18px">🎉</div>
+        <div class="sec-title" style="font-size:24px;margin-bottom:10px">Payment Successful!</div>
+        <div style="color:var(--text2);font-size:14px;line-height:1.7;margin-bottom:26px">
+          Your subscription is now <strong style="color:var(--green-l)">Active</strong>.<br>
+          All premium features are unlocked.
+        </div>
+        <a href="/" class="btn btn-primary" style="width:100%;justify-content:center;padding:14px;font-size:15px">
+          🏠 Go to Dashboard
+        </a>
+        <a href="/school/subscription" style="display:block;margin-top:12px;font-size:13px;color:var(--text2)">
+          View subscription details →
+        </a>
+      </div>
+    </div>"""
+    return layout("Payment Successful", content, "upgrade")
+
+
+# ══════════════════════════════════════════════════════
+#  FIRST-RUN SETUP PAGE
+# ══════════════════════════════════════════════════════
+
+@app.route("/setup", methods=["GET","POST"])
+def setup_page():
+    """
+    First-run setup wizard. Only accessible when NO SUPER_ADMIN exists yet.
+    Once a SUPER_ADMIN exists, this page redirects to /login.
+    """
+    # Lock down once setup is complete
+    if db.super_admin_exists():
+        return redirect("/login")
+
+    msg = ""
+    if request.method == "POST":
+        step = request.form.get("step","1")
+
+        if step == "1":
+            # Create SUPER_ADMIN
+            su_user = request.form.get("su_username","").strip()
+            su_pass = request.form.get("su_password","").strip()
+            su_email= request.form.get("su_email","").strip()
+            if not su_user or not su_pass:
+                msg = '<div class="alert alert-error">Username and password are required.</div>'
+            elif len(su_pass) < 8:
+                msg = '<div class="alert alert-error">Password must be at least 8 characters.</div>'
+            else:
+                ok, err = db.user_create(
+                    school_id=None, role="SUPER_ADMIN",
+                    username=su_user,
+                    password_hash=hash_password(su_pass),
+                    full_name="Super Administrator",
+                    email=su_email,
+                )
+                if ok:
+                    return redirect("/setup/school")
+                else:
+                    msg = f'<div class="alert alert-error">❌ {err}</div>'
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FaceNova Setup</title>
+{CSS}
+</head>
+<body>
+<div class="login-wrap" style="flex-direction:column;gap:0;padding:20px">
+  <div style="max-width:520px;width:100%">
+
+    <!-- Progress -->
+    <div style="display:flex;align-items:center;gap:0;margin-bottom:28px">
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:rgba(255,255,255,0.1)"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:rgba(255,255,255,0.1)"></div>
+    </div>
+
+    <div class="login-card" style="max-width:520px">
+      <div class="login-logo">
+        <div class="login-logo-icon">🧠</div>
+        <div class="login-title">Welcome to FaceNova</div>
+        <div class="login-sub">Step 1 of 3 — Create your Super Admin account</div>
+      </div>
+      {msg}
+      <form method="POST">
+        <input type="hidden" name="step" value="1">
+        <div class="form-group">
+          <label>Super Admin Username *</label>
+          <input type="text" name="su_username" placeholder="e.g. superadmin" required autofocus>
+        </div>
+        <div class="form-group">
+          <label>Password * (min 8 characters)</label>
+          <input type="password" name="su_password" placeholder="Strong password" required>
+        </div>
+        <div class="form-group">
+          <label>Email (optional)</label>
+          <input type="text" name="su_email" placeholder="admin@yourschool.com">
+        </div>
+        <button type="submit" class="btn btn-primary"
+                style="width:100%;justify-content:center;padding:13px;font-size:15px">
+          Continue →
+        </button>
+      </form>
+      <div style="margin-top:20px;padding:14px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--muted)">
+        ⚠️ Save your password — it cannot be recovered without database access.
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>"""
+    return html
+
+
+@app.route("/setup/school", methods=["GET","POST"])
+def setup_school():
+    """Step 2 — Create first school."""
+    if not db.super_admin_exists():
+        return redirect("/setup")
+
+    msg = ""
+    if request.method == "POST":
+        school_id   = request.form.get("school_id","").strip().lower().replace(" ","-")
+        school_name = request.form.get("school_name","").strip()
+        admin_user  = request.form.get("admin_username","").strip()
+        admin_pass  = request.form.get("admin_password","").strip()
+        email       = request.form.get("email","").strip()
+
+        if not all([school_id, school_name, admin_user, admin_pass]):
+            msg = '<div class="alert alert-error">All fields are required.</div>'
+        else:
+            ok, err = db.school_create(school_id, school_name, email=email)
+            if ok:
+                ok2, err2 = db.user_create(
+                    school_id=school_id, role="SCHOOL_ADMIN",
+                    username=admin_user,
+                    password_hash=hash_password(admin_pass),
+                    full_name=f"{school_name} Admin",
+                    email=email,
+                )
+                if ok2:
+                    return redirect("/setup/done")
+                else:
+                    msg = f'<div class="alert alert-error">School created but admin failed: {err2}</div>'
+            else:
+                msg = f'<div class="alert alert-error">❌ {err}</div>'
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FaceNova Setup — School</title>
+{CSS}
+</head>
+<body>
+<div class="login-wrap" style="flex-direction:column;padding:20px">
+  <div style="max-width:520px;width:100%">
+    <div style="display:flex;gap:0;margin-bottom:28px">
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:rgba(255,255,255,0.1)"></div>
+    </div>
+    <div class="login-card" style="max-width:520px">
+      <div class="login-logo">
+        <div class="login-logo-icon">🏫</div>
+        <div class="login-title">Register Your School</div>
+        <div class="login-sub">Step 2 of 3 — School details + Admin account</div>
+      </div>
+      {msg}
+      <form method="POST">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;margin-bottom:12px">SCHOOL INFO</div>
+        <div class="form-group">
+          <label>School Name *</label>
+          <input type="text" name="school_name" placeholder="e.g. Delhi Public School" required autofocus>
+        </div>
+        <div class="form-group">
+          <label>School ID * (short unique code, no spaces)</label>
+          <input type="text" name="school_id" placeholder="e.g. dps-delhi" required>
+        </div>
+        <div class="form-group">
+          <label>School Email</label>
+          <input type="text" name="email" placeholder="info@school.edu">
+        </div>
+        <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:1px;margin:16px 0 12px;padding-top:14px;border-top:1px solid var(--border)">SCHOOL ADMIN LOGIN</div>
+        <div class="form-group">
+          <label>Admin Username *</label>
+          <input type="text" name="admin_username" placeholder="e.g. dps.admin" required>
+        </div>
+        <div class="form-group">
+          <label>Admin Password *</label>
+          <input type="password" name="admin_password" placeholder="Strong password" required>
+        </div>
+        <button type="submit" class="btn btn-primary"
+                style="width:100%;justify-content:center;padding:13px;font-size:15px">
+          Continue →
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+</body></html>"""
+    return html
+
+
+@app.route("/setup/done")
+def setup_done():
+    if not db.super_admin_exists():
+        return redirect("/setup")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FaceNova Setup Complete</title>
+{CSS}
+</head>
+<body>
+<div class="login-wrap" style="flex-direction:column;padding:20px">
+  <div style="max-width:480px;width:100%">
+    <div style="display:flex;gap:0;margin-bottom:28px">
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+      <div style="flex:1;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
+    </div>
+    <div class="login-card" style="text-align:center">
+      <div style="font-size:64px;margin-bottom:16px">🎉</div>
+      <div class="login-title" style="margin-bottom:8px">Setup Complete!</div>
+      <div style="color:var(--text2);font-size:13.5px;line-height:1.7;margin-bottom:24px">
+        FaceNova is ready to use.<br>
+        A <strong style="color:var(--blue)">10-day free trial</strong> has started automatically.<br>
+        Sign in with your School Admin account to get started.
+      </div>
+      <a href="/login" class="btn btn-primary"
+         style="width:100%;justify-content:center;padding:14px;font-size:15px;display:flex">
+        🔐 Sign In Now
+      </a>
+      <div style="margin-top:18px;padding:14px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--muted);text-align:left">
+        Next steps after signing in:<br>
+        1. Go to <strong style="color:var(--text)">Sections</strong> → add your class sections<br>
+        2. Go to <strong style="color:var(--text)">Teachers</strong> → create teacher accounts<br>
+        3. Go to <strong style="color:var(--text)">Enroll</strong> → add students with face photos<br>
+        4. Go to <strong style="color:var(--text)">Scan</strong> → start taking attendance!
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>"""
+    return html
+
+
