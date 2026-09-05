@@ -1940,6 +1940,15 @@ def login():
 
     err_html = f'<div class="alert alert-error" style="margin-bottom:16px">{error}</div>' if error else ""
 
+    # Check if setup has been done yet
+    setup_needed = not db.super_admin_exists()
+    setup_banner = ""
+    if setup_needed:
+        setup_banner = '''<div class="alert alert-info" style="margin-bottom:16px">
+          👋 First time here? <a href="/setup" style="color:var(--blue);font-weight:700">
+          Click here to set up your account →</a>
+        </div>'''
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1956,16 +1965,27 @@ def login():
       <div class="login-title">FaceNova AI</div>
       <div class="login-sub">Sign in to your account</div>
     </div>
+    {setup_banner}
     {err_html}
-    <form method="POST" action="/login">
+    <form method="POST" action="/login" autocomplete="off">
       <input type="hidden" name="next" value="{nxt}">
+      <!-- hidden fake fields to trick browser autofill -->
+      <input type="text"     style="display:none" name="fake_user">
+      <input type="password" style="display:none" name="fake_pass">
       <div class="form-group">
         <label>Username</label>
-        <input type="text" name="username" placeholder="Your username" required autofocus>
+        <input type="text" name="username"
+               placeholder="Enter your username"
+               autocomplete="new-password"
+               required autofocus
+               style="ime-mode:disabled">
       </div>
       <div class="form-group">
         <label>Password</label>
-        <input type="password" name="password" placeholder="••••••••••" required>
+        <input type="password" name="password"
+               placeholder="Enter your password"
+               autocomplete="new-password"
+               required>
       </div>
       <button type="submit" class="btn btn-primary"
               style="width:100%;justify-content:center;padding:13px;font-size:15px;margin-top:6px">
@@ -1973,10 +1993,17 @@ def login():
       </button>
     </form>
     <div style="text-align:center;margin-top:18px;font-size:12px;color:var(--muted)">
-      Contact your School Administrator for account access.
+      Don't have an account? Contact your School Administrator.
     </div>
   </div>
 </div>
+<script>
+  // Clear any browser-autofilled values on page load
+  window.addEventListener('load', function() {{
+    document.querySelector('input[name="username"]').value = '';
+    document.querySelector('input[name="password"]').value = '';
+  }});
+</script>
 </body></html>"""
     return html
 
@@ -3300,3 +3327,4 @@ def setup_done():
   </div>
 </div></div></div></body></html>"""
     return html
+
