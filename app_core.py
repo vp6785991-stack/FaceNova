@@ -16,8 +16,15 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or _secrets.token_hex(32)
 app.permanent_session_lifetime = timedelta(days=7)
 
-DATA_DIR     = "data"
-GRAPH_DIR    = "graphs"
+# On Render use /tmp for file storage (survives session)
+if os.environ.get("RENDER"):
+    DATA_DIR  = "/tmp/facenova_data"
+    GRAPH_DIR = "/tmp/facenova_graphs"
+else:
+    DATA_DIR  = "data"
+    GRAPH_DIR = "graphs"
+os.makedirs(DATA_DIR,  exist_ok=True)
+os.makedirs(GRAPH_DIR, exist_ok=True)
 # sections file is now per-school (computed at runtime)
 SECTIONS_FILE = os.path.join("data", "sections.json")  # legacy fallback
 os.makedirs(DATA_DIR,  exist_ok=True)
@@ -502,3 +509,4 @@ function closeDrawer(){{
 
 {_exp_popup}
 </body></html>"""
+
