@@ -1,11 +1,16 @@
 # db.py — FaceNova Database Layer
 # SQLite via Python built-in sqlite3. No extra installs needed.
-# Single file: data/facenova.db
 
 import sqlite3, os
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.join("data", "facenova.db")
+# On Render: use /tmp (survives restarts within same session)
+# Locally: use data/ folder
+if os.environ.get("RENDER"):
+    DB_PATH = "/tmp/facenova.db"
+else:
+    os.makedirs("data", exist_ok=True)
+    DB_PATH = os.path.join("data", "facenova.db")
 
 # ── Feature permission map per plan ──────────────────────────────────────
 PLAN_FEATURES = {
@@ -385,3 +390,4 @@ def super_admin_exists():
     row  = conn.execute("SELECT id FROM users WHERE role='SUPER_ADMIN' LIMIT 1").fetchone()
     conn.close()
     return row is not None
+
