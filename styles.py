@@ -830,7 +830,9 @@ video{border-radius:var(--radius);display:block}
 .dev-table td,.dev-table th{padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px}
 .dev-table th{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 
-@media(max-width:768px){.plan-grid{grid-template-columns:1fr}}
+@media(max-width:768px){
+  .plan-grid{grid-template-columns:1fr}
+}
 
 /* ══ RESPONSIVE ══════════════════════════════════════════ */
 @media(max-width:960px){
@@ -839,13 +841,30 @@ video{border-radius:var(--radius);display:block}
   .stats-row{grid-template-columns:1fr 1fr}
   .grid-2,.grid-3{grid-template-columns:1fr}
   .main{padding-bottom:70px}
+  /* force all inline 4-col grids to 2-col */
+  [style*="repeat(4"]{grid-template-columns:1fr 1fr !important}
 }
+
 @media(max-width:560px){
   .page{padding:14px}
+  /* single column everything on small phones */
   .stats-row{grid-template-columns:1fr 1fr}
+  .plan-grid{grid-template-columns:1fr !important}
   .hero{padding:18px}
   .hero h1{font-size:19px}
   .login-card{padding:30px 22px}
+  /* fix text overflow in cards */
+  .plan-card{min-width:0;word-break:break-word}
+  .stat-val{font-size:24px}
+  /* fix scan page camera overflow */
+  video{width:100% !important;max-width:100%}
+  .scan-wrap{width:100%}
+  /* fix table overflow */
+  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:400px}
+  /* fix section tabs overflow */
+  .sec-tabs{overflow-x:auto;flex-wrap:nowrap;padding-bottom:6px}
+  .sec-tab{flex-shrink:0}
 }
 
 /* ══ MOBILE BOTTOM NAV ═══════════════════════════════════ */
@@ -949,3 +968,4 @@ video{border-radius:var(--radius);display:block}
 }
 </style>
 """
+
