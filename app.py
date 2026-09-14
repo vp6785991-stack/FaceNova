@@ -1,5 +1,5 @@
 # app.py — FaceNova AI Attendance System
-# gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
+# Start command: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
 
 import os
 
@@ -17,21 +17,10 @@ from auth import hash_password
 # Initialise database tables every startup
 db.init_db()
 
-# ── Always recreate SUPER_ADMIN from env vars on every startup ────
-# This fixes Render free plan resetting the database
-su_user = os.environ.get("SUPER_ADMIN_USERNAME", "")
-su_pass = os.environ.get("SUPER_ADMIN_PASSWORD", "")
-
-# ── Always recreate SUPER_ADMIN from env vars on every startup ────
-su_user = os.environ.get("SUPER_ADMIN_USERNAME", "").strip()
-su_pass = os.environ.get("SUPER_ADMIN_PASSWORD", "").strip()
-
-# Fallback default credentials if env vars not set
-# CHANGE THESE after first login!
-if not su_user:
-    su_user = "superadmin"
-if not su_pass:
-    su_pass = "FaceNova@2024"
+# Always recreate SUPER_ADMIN from env vars on every startup
+# This survives Render free plan database resets
+su_user = os.environ.get("SUPER_ADMIN_USERNAME", "").strip() or "superadmin"
+su_pass = os.environ.get("SUPER_ADMIN_PASSWORD", "").strip() or "FaceNova@2024"
 
 conn = db.get_conn()
 existing = conn.execute(
@@ -54,13 +43,14 @@ else:
 conn.commit()
 conn.close()
 
-# Import Flask app — must be named 'app' for gunicorn
+# Import Flask app object — must be named 'app' for gunicorn
 from app_core import app
 
-# Register all routes
-import routes  # noqa: F401
+# Register ALL routes — both files MUST be imported before gunicorn serves
+import routes   # noqa: F401 — dashboard, scan, students, gallery, analytics
+import routes2  # noqa: F401 — login, teacher, subscription, superadmin, landing
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-import routes2  # noqa: F401 — registers auth, teacher, subscription, landing routes
+
